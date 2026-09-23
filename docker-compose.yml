@@ -1,0 +1,46 @@
+# Docker Compose file for the job-market-etl project.
+# For now it runs just one service: a PostgreSQL database.
+# Start it with:  docker compose up -d
+# Stop it with:   docker compose down
+
+services:
+  postgres:
+    # Official PostgreSQL image, pinned to major version 17 so the setup
+    # doesn't change unexpectedly when a new major version comes out.
+    image: postgres:17
+    container_name: job-market-postgres
+    restart: unless-stopped
+
+    # Credentials come from the .env file in the project root.
+    # Docker Compose reads .env automatically and substitutes ${...} values.
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    # Expose Postgres on localhost:5432 so tools on your machine
+    # (psql, DBeaver, and later our Python code) can connect to it.
+    ports:
+      - "5432:5432"
+
+    volumes:
+      # Named volume: keeps the database data even if the container is removed.
+      - pgdata:/var/lib/postgresql/data
+      # Scripts in /docker-entrypoint-initdb.d/ run ONCE, only when the
+      # database is created for the first time (i.e. the volume is empty).
+      # ":ro" = read-only, the container cannot modify our file.
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    # Healthcheck: Docker runs pg_isready periodically to see whether
+    # Postgres is accepting connections. `docker compose ps` shows the result.
+    # "$$" escapes "$" so the variable is expanded inside the container, not by Compose.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+# Named volumes are declared here; Docker manages where they live on disk.
+volumes:
+  pgdata:

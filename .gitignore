@@ -1,0 +1,13 @@
+# Secrets / local config
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Raw API responses (can be large and are re-downloadable)
+data/raw/
+
+# Local Claude Code settings
+.claude/settings.local.json
