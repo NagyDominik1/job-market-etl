@@ -66,5 +66,35 @@ Temporary failures (connection errors, timeouts, HTTP 429 and 5xx) are retried u
 with exponential backoff. If any page still fails, no file is written and the script exits
 with code 1.
 
+## Transform
+
+The transform step (`src/transform.py`) cleans the newest raw file with pandas into a table
+whose columns match the `jobs` database table. It does not write anything yet.
+
+```bash
+.venv\Scripts\python -m src.transform                  # newest file in data/raw/
+.venv\Scripts\python -m src.transform path\to\file.json  # a specific file
+```
+
+What is cleaned, and why:
+
+- **Descriptions**: HTML is converted to plain text (one paragraph or list item per line),
+  and entities like `&amp;` become characters. Some API descriptions are HTML-escaped twice
+  (`&lt;p&gt;`); these are cleaned too. Plain text is easier to search and analyse.
+- **Titles**: gender markers such as `(m/w/d)` or `(f/m/d)` are removed, so that
+  "Developer (m/w/d)" and "Developer" count as the same job title.
+- **Text fields**: surrounding spaces are removed and empty strings become `NULL`,
+  so "missing" always looks the same.
+- **`tags` / `job_types`**: missing values become an empty list, so they are always lists.
+- **Dates**: `created_at` (Unix seconds) becomes a UTC datetime called `posted_at`.
+- **Bad rows**: rows without a `slug` or `title` are dropped (the table requires them),
+  and duplicate slugs are dropped (the slug is the primary key). The counts are logged.
+
+Run the tests:
+
+```bash
+.venv\Scripts\python -m pytest
+```
+
 > Note: `sql/init.sql` only runs the first time the database is created. If you change it,
 > reset the database with `docker compose down -v` (this **deletes all data**) and start again.
