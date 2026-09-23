@@ -37,5 +37,34 @@ Requirements: [Docker Desktop](https://www.docker.com/products/docker-desktop/) 
    docker compose exec postgres psql -U etl_user -d job_market -c "\dt"
    ```
 
+## Extract
+
+The extract step downloads job postings from the Arbeitnow API and saves them, unchanged,
+to `data/raw/jobs_<UTC timestamp>.json`.
+
+Set up Python once (Windows commands shown; on macOS/Linux use `.venv/bin/python`):
+
+```bash
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+```
+
+Run it:
+
+```bash
+.venv\Scripts\python -m src.extract
+```
+
+Optional environment variables:
+
+| Variable    | Default                                        | Meaning                        |
+|-------------|------------------------------------------------|--------------------------------|
+| `API_URL`   | `https://www.arbeitnow.com/api/job-board-api`  | First page to download         |
+| `MAX_PAGES` | `3`                                            | Maximum number of pages to get |
+
+Temporary failures (connection errors, timeouts, HTTP 429 and 5xx) are retried up to 3 times
+with exponential backoff. If any page still fails, no file is written and the script exits
+with code 1.
+
 > Note: `sql/init.sql` only runs the first time the database is created. If you change it,
 > reset the database with `docker compose down -v` (this **deletes all data**) and start again.
