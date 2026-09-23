@@ -1,13 +1,19 @@
-"""ENRICH step: classify jobs with the Claude API.
+"""ENRICH step: classify jobs (seniority, category, skills).
 
-For jobs that have no row in `job_enrichment` yet, Claude reads the title and
-description and returns the seniority level, the job category and a list of
-skills. The results are validated and saved to `job_enrichment`.
+Two modes:
+  - With ANTHROPIC_API_KEY: Claude reads the title and description of up to
+    ENRICH_LIMIT jobs per run and returns the seniority level, the job category
+    and a list of skills. Jobs never enriched come first, then jobs that so far
+    only have a rule-based result (so adding a key later upgrades them).
+  - Without a key: the free rule-based fallback (src/rules.py) classifies ALL
+    jobs that have no enrichment yet, using keyword matching.
+All results are validated and saved to `job_enrichment`.
 
 Settings (environment variables, from .env):
-    ANTHROPIC_API_KEY  API key. If empty, this step is skipped.
+    ANTHROPIC_API_KEY  API key. If empty, the rule-based fallback is used.
     ANTHROPIC_MODEL    Claude model to use (default: claude-haiku-4-5-20251001)
-    ENRICH_LIMIT       max number of jobs to enrich per run (default: 20)
+    ENRICH_LIMIT       max number of jobs sent to Claude per run (default: 20);
+                       0 turns the whole step off
 
 Run it on its own with:
     .venv\\Scripts\\python -m src.enrich
@@ -21,6 +27,7 @@ import anthropic
 import psycopg
 
 from src.db import get_connection
+from src.rules import RULE_BASED_MODEL, classify_with_rules
 
 logger = logging.getLogger(__name__)
 
@@ -122,15 +129,25 @@ OUTPUT_SCHEMA = {
     "additionalProperties": False,
 }
 
-# Jobs without an enrichment row, newest first.
-# LEFT JOIN + "IS NULL" = "jobs that have NO matching row in job_enrichment".
-SELECT_JOBS_SQL = """
+# Jobs for Claude: those without an enrichment row, and those that so far
+# only have a rule-based one (so adding an API key later upgrades them).
+# LEFT JOIN + "e.slug IS NULL" = "jobs that have NO matching row in job_enrichment".
+# "(e.slug IS NULL) DESC" puts never-enriched jobs first; then newest first.
+SELECT_JOBS_FOR_CLAUDE_SQL = """
+    SELECT j.slug, j.title, j.description
+    FROM jobs AS j
+    LEFT JOIN job_enrichment AS e ON e.slug = j.slug
+    WHERE e.slug IS NULL OR e.model = %s
+    ORDER BY (e.slug IS NULL) DESC, j.posted_at DESC NULLS LAST, j.slug
+    LIMIT %s
+"""
+
+# Jobs for the rule-based fallback: ALL jobs without an enrichment row.
+SELECT_UNENRICHED_JOBS_SQL = """
     SELECT j.slug, j.title, j.description
     FROM jobs AS j
     LEFT JOIN job_enrichment AS e ON e.slug = j.slug
     WHERE e.slug IS NULL
-    ORDER BY j.posted_at DESC NULLS LAST, j.slug
-    LIMIT %s
 """
 
 INSERT_ENRICHMENT_SQL = """
@@ -259,17 +276,45 @@ def classify_job(client: anthropic.Anthropic, model: str, title: str, descriptio
 # --- The enrich step --------------------------------------------------------
 
 def enrich(conn: psycopg.Connection) -> int:
-    """Enrich up to ENRICH_LIMIT jobs and return how many were enriched."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key:
-        logger.warning("ANTHROPIC_API_KEY is empty, skipping AI enrichment")
-        return 0
-
+    """Enrich jobs (with Claude, or with rules if there's no API key) and return how many."""
     limit = get_enrich_limit()
     if limit == 0:
-        logger.info("ENRICH_LIMIT=0, skipping AI enrichment")
+        logger.info("ENRICH_LIMIT=0, skipping enrichment")
         return 0
 
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY is empty, using the free rule-based fallback instead of Claude")
+        return enrich_with_rules(conn)
+
+    return enrich_with_claude(conn, api_key, limit)
+
+
+def enrich_with_rules(conn: psycopg.Connection) -> int:
+    """Classify ALL jobs without an enrichment row using keyword rules."""
+    with conn.transaction():
+        jobs = conn.execute(SELECT_UNENRICHED_JOBS_SQL).fetchall()
+
+    rows = []
+    for slug, title, description in jobs:
+        # Same validation as for Claude's answers (canonical names, max 10 skills).
+        result = validate_enrichment(classify_with_rules(title, description))
+        rows.append((slug, result["seniority"], result["category"], result["skills"], RULE_BASED_MODEL))
+
+    # Unlike the Claude path, all rows go into ONE transaction: the rules are
+    # free and take milliseconds, so there is no paid work to protect by
+    # committing row by row. If something fails, nothing is saved and the
+    # next run simply does it again.
+    with conn.transaction():
+        with conn.cursor() as cursor:
+            cursor.executemany(INSERT_ENRICHMENT_SQL, rows)
+
+    logger.info("Rule-based enrichment: %d jobs classified", len(rows))
+    return len(rows)
+
+
+def enrich_with_claude(conn: psycopg.Connection, api_key: str, limit: int) -> int:
+    """Enrich up to `limit` jobs with Claude and return how many were enriched."""
     model = os.environ.get("ANTHROPIC_MODEL", "").strip() or DEFAULT_MODEL
 
     # Read the jobs inside a short transaction of its own. Without it, psycopg
@@ -277,7 +322,7 @@ def enrich(conn: psycopg.Connection) -> int:
     # "with conn.transaction()" blocks below would become parts of that one
     # big transaction instead of committing separately.
     with conn.transaction():
-        jobs = conn.execute(SELECT_JOBS_SQL, (limit,)).fetchall()
+        jobs = conn.execute(SELECT_JOBS_FOR_CLAUDE_SQL, (RULE_BASED_MODEL, limit)).fetchall()
     logger.info("Enriching %d jobs with %s (ENRICH_LIMIT=%d)", len(jobs), model, limit)
 
     # The SDK retries rate limits (429), server errors (5xx) and connection

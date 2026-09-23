@@ -64,6 +64,29 @@ def test_gender_markers_are_removed_from_titles():
     assert clean_title("  Python Developer ( m / w / x )  ") == "Python Developer"
 
 
+def test_other_gender_markers_are_removed_from_titles():
+    assert clean_title("Software Engineer (all genders)") == "Software Engineer"
+    assert clean_title("Software Engineer (All Genders)") == "Software Engineer"
+    assert clean_title("Software Engineer (all gender)") == "Software Engineer"
+    assert clean_title("Softwareentwickler (gn)") == "Softwareentwickler"
+    assert clean_title("Coordinateur Supply Chain (H/F/N)") == "Coordinateur Supply Chain"
+    assert clean_title("Comptable auxiliaire (F/H)") == "Comptable auxiliaire"
+
+
+def test_gender_markers_without_brackets_are_removed():
+    assert clean_title("Security Lead - m/f/d") == "Security Lead"
+    assert clean_title("Account Executive - m/f/d - France") == "Account Executive - France"
+    assert clean_title("Senior Manager MES | m/w/d") == "Senior Manager MES"
+    assert clean_title("Chargé RH en alternance H/F/X") == "Chargé RH en alternance"
+    assert clean_title("Coordinateur Supply Chain - (H/F/N)") == "Coordinateur Supply Chain"
+
+
+def test_slashes_that_are_not_gender_markers_are_kept():
+    assert clean_title("UX/UI Designer") == "UX/UI Designer"
+    assert clean_title("Business/Demand Planner") == "Business/Demand Planner"
+    assert clean_title("Werkstudent (Vollzeit/Minijob)") == "Werkstudent (Vollzeit/Minijob)"
+
+
 def test_title_keeps_other_brackets():
     assert clean_title("Senior Developer (Backend)") == "Senior Developer (Backend)"
 

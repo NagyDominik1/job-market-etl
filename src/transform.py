@@ -44,17 +44,26 @@ PLAIN_TEXT_COLUMNS = ["slug", "company_name", "location", "url"]
 # the newline separator would split the sentence into three lines.
 INLINE_TAGS = ["a", "abbr", "b", "code", "em", "font", "i", "small", "span", "strong", "sub", "sup", "u"]
 
-# Matches German-style gender markers such as (m/w/d), (f/m/d), (w/m/d), (m/w/x).
-#   \(         an opening bracket
-#   \s*        optional spaces
-#   [mwfdx]    one of the letters m, w, f, d, x (in any order)
-#   (?: ... ){1,2}  followed by one or two more "/letter" parts
-#   \)         a closing bracket
-# re.IGNORECASE makes it also match (M/W/D).
+# Gender markers that job titles in Germany, France etc. often contain.
+#
+# 1. In brackets: (m/w/d), (f/m/x), (h/f/n) (French: homme/femme/non-binaire),
+#    (all genders), (alle Geschlechter), (gn) (German "geschlechtsneutral").
+#      [mwfdxhn]            one of these letters, in any order
+#      (?:/[mwfdxhn]){1,2}  followed by one or two more "/letter" parts
+# 2. Without brackets, e.g. "Security Lead - m/f/d" or "Chargé RH H/F/X".
+#    Here the letters must stand alone (not part of a word like "UX/UI").
+# re.IGNORECASE makes it also match (M/W/D) or (All Genders).
+LETTER_MARKER = r"[mwfdxhn]\s*(?:/\s*[mwfdxhn]\s*){1,2}"
 GENDER_MARKER_PATTERN = re.compile(
-    r"\(\s*[mwfdx]\s*(?:/\s*[mwfdx]\s*){1,2}\)",
+    r"\(\s*(?:" + LETTER_MARKER + r"|all\s+genders?|alle\s+geschlechter|gn\*?)\s*\)"
+    r"|(?<![\w/])" + LETTER_MARKER + r"(?![\w/])",
     re.IGNORECASE,
 )
+
+# Separators that can be left dangling after removing a marker,
+# e.g. "Security Lead - m/f/d" -> "Security Lead -".
+DANGLING_SEPARATOR_AT_END = re.compile(r"\s*[-–|,]\s*$")
+DOUBLE_SEPARATOR = re.compile(r"([-–|])\s*[-–|]")  # "Engineer - - France" -> "Engineer - France"
 
 # Looks for something like "<p>" or "</strong>" in text.
 HTML_TAG_PATTERN = re.compile(r"</?[a-zA-Z][^>]*>")
@@ -106,7 +115,11 @@ def clean_title(title) -> str | None:
     if not isinstance(title, str):
         return None
     title = GENDER_MARKER_PATTERN.sub("", title)
-    # Removing the marker can leave double spaces behind, e.g. "Engineer  - Berlin".
+    # Removing the marker can leave double spaces or separators behind,
+    # e.g. "Engineer  - Berlin" or "Engineer - - France" or "Engineer -".
+    title = re.sub(r"\s+", " ", title).strip()
+    title = DOUBLE_SEPARATOR.sub(r"\1", title)
+    title = DANGLING_SEPARATOR_AT_END.sub("", title)
     title = re.sub(r"\s+", " ", title).strip()
     return title or None
 
