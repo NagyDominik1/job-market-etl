@@ -96,5 +96,40 @@ Run the tests:
 .venv\Scripts\python -m pytest
 ```
 
+## Load
+
+The load step (`src/load.py`) writes the cleaned jobs into the `jobs` table with an
+**upsert** (`INSERT ... ON CONFLICT (slug) DO UPDATE`):
+
+- a job with a new `slug` is inserted; `first_seen_at` and `last_seen_at` are set to now
+- a job that already exists is updated with the latest data and `last_seen_at = now()`;
+  `first_seen_at` is kept, so you can see how long a job has been online
+- all rows are written in **one transaction**: if anything fails, everything is rolled back,
+  so the table is never half-loaded
+
+Database settings are read from `.env` (`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`,
+`POSTGRES_USER`, `POSTGRES_PASSWORD`) by `src/db.py`. Variables already set in your shell
+take priority over `.env`.
+
+## Run the full pipeline
+
+Make sure the database is running (`docker compose up -d`), then:
+
+```bash
+.venv\Scripts\python -m src.main
+```
+
+This runs extract → transform → load and records every run in the `etl_runs` table:
+`running` at the start, then `success` (with row counts) or `failed` (with the error message).
+On failure the script exits with code 1. Running it again is safe: existing jobs are updated,
+not duplicated.
+
+Check the results:
+
+```bash
+docker compose exec postgres psql -U etl_user -d job_market -c "SELECT count(*) FROM jobs;"
+docker compose exec postgres psql -U etl_user -d job_market -c "SELECT id, status, rows_extracted, rows_loaded, error_message FROM etl_runs ORDER BY id;"
+```
+
 > Note: `sql/init.sql` only runs the first time the database is created. If you change it,
 > reset the database with `docker compose down -v` (this **deletes all data**) and start again.
