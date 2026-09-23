@@ -6,9 +6,39 @@ pandas, and stores them in a PostgreSQL database running in Docker. Every pipeli
 logged to an `etl_runs` table so you can see when it ran, how many rows it processed,
 and whether it succeeded.
 
-## Getting started
+## Quick start (Docker only)
 
-Requirements: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Docker Compose).
+Requirements: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes
+Docker Compose) and git. You don't need Python on your machine.
+
+```bash
+git clone https://github.com/NagyDominik1/job-market-etl.git
+cd job-market-etl
+cp .env.example .env          # Windows PowerShell: Copy-Item .env.example .env
+docker compose up --build
+```
+
+This builds the pipeline image, starts PostgreSQL, waits until it is healthy, then runs the
+pipeline once. You should see `ETL run id=1 succeeded` and `pipeline-1 exited with code 0`.
+PostgreSQL keeps running; press `Ctrl+C` to stop it (or run `docker compose down`).
+
+Useful commands:
+
+```bash
+docker compose run --rm pipeline                     # run the pipeline again
+docker compose run --rm pipeline python -m pytest    # run the tests in the container
+docker compose exec postgres psql -U etl_user -d job_market -c "SELECT count(*) FROM jobs;"
+```
+
+(Replace `etl_user` / `job_market` with the values from your `.env`.) Raw API responses are
+saved to `./data/raw/` on your machine.
+
+## Local development
+
+For working on the code, run PostgreSQL in Docker and the Python code in a local virtual
+environment.
+
+### Database
 
 1. Create your local config file from the template, then edit the values:
 
@@ -18,10 +48,10 @@ Requirements: [Docker Desktop](https://www.docker.com/products/docker-desktop/) 
 
    (On Windows PowerShell: `Copy-Item .env.example .env`)
 
-2. Start the database in the background:
+2. Start only the database in the background:
 
    ```bash
-   docker compose up -d
+   docker compose up -d postgres
    ```
 
 3. Check that it's healthy. The `STATUS` column should say `(healthy)`:
@@ -30,17 +60,13 @@ Requirements: [Docker Desktop](https://www.docker.com/products/docker-desktop/) 
    docker compose ps
    ```
 
-   You can also list the tables to confirm the schema was created
-   (replace `etl_user` / `job_market` with the values from your `.env`):
+   You can also list the tables to confirm the schema was created:
 
    ```bash
    docker compose exec postgres psql -U etl_user -d job_market -c "\dt"
    ```
 
-## Extract
-
-The extract step downloads job postings from the Arbeitnow API and saves them, unchanged,
-to `data/raw/jobs_<UTC timestamp>.json`.
+### Python
 
 Set up Python once (Windows commands shown; on macOS/Linux use `.venv/bin/python`):
 
@@ -49,7 +75,10 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-Run it:
+### Extract
+
+The extract step downloads job postings from the Arbeitnow API and saves them, unchanged,
+to `data/raw/jobs_<UTC timestamp>.json`.
 
 ```bash
 .venv\Scripts\python -m src.extract
@@ -66,10 +95,10 @@ Temporary failures (connection errors, timeouts, HTTP 429 and 5xx) are retried u
 with exponential backoff. If any page still fails, no file is written and the script exits
 with code 1.
 
-## Transform
+### Transform
 
 The transform step (`src/transform.py`) cleans the newest raw file with pandas into a table
-whose columns match the `jobs` database table. It does not write anything yet.
+whose columns match the `jobs` database table. It does not write anything.
 
 ```bash
 .venv\Scripts\python -m src.transform                  # newest file in data/raw/
@@ -88,7 +117,8 @@ What is cleaned, and why:
 - **`tags` / `job_types`**: missing values become an empty list, so they are always lists.
 - **Dates**: `created_at` (Unix seconds) becomes a UTC datetime called `posted_at`.
 - **Bad rows**: rows without a `slug` or `title` are dropped (the table requires them),
-  and duplicate slugs are dropped (the slug is the primary key). The counts are logged.
+  and duplicate slugs are dropped (the slug is the primary key; the API sometimes lists
+  the same job on two pages). The counts are logged.
 
 Run the tests:
 
@@ -96,7 +126,7 @@ Run the tests:
 .venv\Scripts\python -m pytest
 ```
 
-## Load
+### Load
 
 The load step (`src/load.py`) writes the cleaned jobs into the `jobs` table with an
 **upsert** (`INSERT ... ON CONFLICT (slug) DO UPDATE`):
@@ -111,9 +141,9 @@ Database settings are read from `.env` (`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTG
 `POSTGRES_USER`, `POSTGRES_PASSWORD`) by `src/db.py`. Variables already set in your shell
 take priority over `.env`.
 
-## Run the full pipeline
+### Run the full pipeline
 
-Make sure the database is running (`docker compose up -d`), then:
+With the database running:
 
 ```bash
 .venv\Scripts\python -m src.main

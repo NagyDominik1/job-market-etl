@@ -1,0 +1,9 @@
+# Files Docker should NOT send to the image build ("build context").
+# Keeps the image small and secrets (.env) out of it.
+.venv
+.env
+data/
+.git
+__pycache__
+.pytest_cache
+.claude/

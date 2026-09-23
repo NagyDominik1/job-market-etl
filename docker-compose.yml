@@ -1,7 +1,12 @@
 # Docker Compose file for the job-market-etl project.
-# For now it runs just one service: a PostgreSQL database.
-# Start it with:  docker compose up -d
-# Stop it with:   docker compose down
+# Two services:
+#   postgres  - the PostgreSQL database (runs all the time)
+#   pipeline  - the ETL job (runs once, loads the data, then exits)
+#
+# Start everything:        docker compose up --build
+# Start only the database: docker compose up -d postgres
+# Run the pipeline again:  docker compose run --rm pipeline
+# Stop everything:         docker compose down
 
 services:
   postgres:
@@ -40,6 +45,38 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  pipeline:
+    # Build the image from the Dockerfile in this folder.
+    build: .
+
+    # Load the same settings as the database (POSTGRES_DB, USER, PASSWORD, ...).
+    env_file: .env
+
+    # Values in "environment" win over env_file.
+    # Inside a container, "localhost" means the container ITSELF, not your
+    # computer, so localhost:5432 would find nothing. Compose puts all services
+    # on a shared network where each service can be reached by its name, so the
+    # database is at host "postgres". Port 5432 is Postgres' port inside that
+    # network (the "5432:5432" mapping above is only for your computer).
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+
+    # Don't start until the postgres healthcheck passes (not just "started"),
+    # otherwise the pipeline could try to connect before Postgres is ready.
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    # Share ./data with the container, so raw JSON files written to
+    # /app/data/raw inside the container end up in ./data/raw on your computer.
+    volumes:
+      - ./data:/app/data
+
+    # A batch job: it runs once and exits. "no" = never restart it automatically
+    # (this is the default; written out here to make it explicit).
+    restart: "no"
 
 # Named volumes are declared here; Docker manages where they live on disk.
 volumes:
