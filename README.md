@@ -30,10 +30,11 @@ Requirements: [Docker Desktop](https://www.docker.com/products/docker-desktop/) 
    docker compose ps
    ```
 
-   You can also list the tables to confirm the schema was created:
+   You can also list the tables to confirm the schema was created
+   (replace `etl_user` / `job_market` with the values from your `.env`):
 
    ```bash
-   docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"'
+   docker compose exec postgres psql -U etl_user -d job_market -c "\dt"
    ```
 
 > Note: `sql/init.sql` only runs the first time the database is created. If you change it,
