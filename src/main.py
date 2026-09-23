@@ -1,4 +1,4 @@
-"""Pipeline runner: extract -> transform -> load, logged in the etl_runs table.
+"""Pipeline runner: extract -> transform -> load -> enrich, logged in the etl_runs table.
 
 Run it with:
     .venv\\Scripts\\python -m src.main
@@ -11,6 +11,7 @@ import psycopg
 import requests
 
 from src.db import get_connection
+from src.enrich import enrich
 from src.extract import extract
 from src.load import load_jobs
 from src.transform import load_raw, transform
@@ -39,17 +40,17 @@ def start_run() -> int:
     return run_id
 
 
-def finish_run_success(run_id: int, rows_extracted: int, rows_loaded: int) -> None:
+def finish_run_success(run_id: int, rows_extracted: int, rows_loaded: int, rows_enriched: int | None) -> None:
     """Mark the run as successful and store the row counts."""
     with get_connection() as conn:
         conn.execute(
             """
             UPDATE etl_runs
             SET finished_at = now(), status = 'success',
-                rows_extracted = %s, rows_loaded = %s
+                rows_extracted = %s, rows_loaded = %s, rows_enriched = %s
             WHERE id = %s
             """,
-            (rows_extracted, rows_loaded, run_id),
+            (rows_extracted, rows_loaded, rows_enriched, run_id),
         )
 
 
@@ -68,6 +69,21 @@ def finish_run_failed(run_id: int, error_message: str, rows_extracted: int | Non
 
 
 # --- The pipeline -------------------------------------------------------------
+
+def run_enrichment() -> int | None:
+    """Run the enrich step. Never raises: returns the count, or None if it crashed.
+
+    Enrichment is optional extra data. When it runs, the jobs are already
+    loaded, so a problem here is only logged as a warning and does NOT mark
+    the whole run as failed.
+    """
+    try:
+        with get_connection() as conn:
+            return enrich(conn)
+    except Exception:
+        logger.warning("AI enrichment failed; the data load was not affected", exc_info=True)
+        return None
+
 
 def run_pipeline() -> None:
     """Run extract -> transform -> load once and record the result in etl_runs."""
@@ -94,10 +110,14 @@ def run_pipeline() -> None:
             counts = load_jobs(conn, df)
 
         rows_loaded = counts["inserted"] + counts["updated"]
-        finish_run_success(run_id, rows_extracted, rows_loaded)
+
+        # ENRICH: classify new jobs with Claude (optional, never fails the run)
+        rows_enriched = run_enrichment()
+
+        finish_run_success(run_id, rows_extracted, rows_loaded, rows_enriched)
         logger.info(
-            "ETL run id=%d succeeded: extracted=%d, loaded=%d (inserted=%d, updated=%d)",
-            run_id, rows_extracted, rows_loaded, counts["inserted"], counts["updated"],
+            "ETL run id=%d succeeded: extracted=%d, loaded=%d (inserted=%d, updated=%d), enriched=%s",
+            run_id, rows_extracted, rows_loaded, counts["inserted"], counts["updated"], rows_enriched,
         )
 
     # "except Exception" catches every normal error from any step, so the

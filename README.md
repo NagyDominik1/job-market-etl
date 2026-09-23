@@ -18,6 +18,9 @@ cp .env.example .env          # Windows PowerShell: Copy-Item .env.example .env
 docker compose up --build
 ```
 
+Optional: put an Anthropic API key in `.env` (`ANTHROPIC_API_KEY=...`) to also classify jobs
+with Claude (see [AI enrichment](#ai-enrichment)). Without a key that step is skipped.
+
 This builds the pipeline image, starts PostgreSQL, waits until it is healthy, then runs the
 pipeline once. You should see `ETL run id=1 succeeded` and `pipeline-1 exited with code 0`.
 PostgreSQL keeps running; press `Ctrl+C` to stop it (or run `docker compose down`).
@@ -149,7 +152,7 @@ With the database running:
 .venv\Scripts\python -m src.main
 ```
 
-This runs extract → transform → load and records every run in the `etl_runs` table:
+This runs extract → transform → load → enrich and records every run in the `etl_runs` table:
 `running` at the start, then `success` (with row counts) or `failed` (with the error message).
 On failure the script exits with code 1. Running it again is safe: existing jobs are updated,
 not duplicated.
@@ -161,5 +164,87 @@ docker compose exec postgres psql -U etl_user -d job_market -c "SELECT count(*) 
 docker compose exec postgres psql -U etl_user -d job_market -c "SELECT id, status, rows_extracted, rows_loaded, error_message FROM etl_runs ORDER BY id;"
 ```
 
-> Note: `sql/init.sql` only runs the first time the database is created. If you change it,
-> reset the database with `docker compose down -v` (this **deletes all data**) and start again.
+## AI enrichment
+
+**What:** after loading, `src/enrich.py` sends each new job's title and the first 4,000
+characters of its description to Claude, which returns three fields stored in the
+`job_enrichment` table:
+
+- `seniority`: `intern`, `junior`, `mid`, `senior`, `lead` or `unknown`
+- `category`: `data`, `backend`, `frontend`, `fullstack`, `devops`, `mobile`, `security`,
+  `ai_ml`, `qa`, `design`, `non_tech` or `other`
+- `skills`: up to 10 technologies, e.g. `{Python,PostgreSQL,AWS}`
+
+**Why:** the API only has free-text titles, descriptions and loose tags. With consistent
+categories and skill names you can answer questions like "which skills do data jobs ask for
+most?" with plain SQL.
+
+**Cost control:**
+
+- only jobs **without** an enrichment row are sent, so a job is never paid for twice
+- at most `ENRICH_LIMIT` jobs per run (default 20); `ENRICH_LIMIT=0` turns the step off
+- descriptions are cut to 4,000 characters, and the default model is the small, cheap
+  Claude Haiku 4.5 (`ANTHROPIC_MODEL`)
+- the token usage of each run is logged
+- no `ANTHROPIC_API_KEY` → the step is skipped with a warning (the pipeline still succeeds)
+
+**Validation:** Claude must answer in a fixed JSON format (structured outputs with a JSON
+schema), and `validate_enrichment()` checks the answer again: seniority and category must be
+allowed values; skills are trimmed, spelled consistently (`postgres` → `PostgreSQL`),
+de-duplicated and limited to 10. The table's `CHECK` constraints are a final safety net.
+A job with an invalid answer or an API error is skipped with a warning and retried in the next
+run; the other jobs continue. Each job is committed separately, so finished work is never lost.
+
+The job description is untrusted text from the internet, so the prompt tells Claude to treat it
+as data only and to ignore any instructions inside it.
+
+Enrichment problems never mark the run as failed: the jobs are already loaded by then.
+`etl_runs.rows_enriched` shows how many jobs each run enriched.
+
+### Example analysis
+
+`sql/analysis.sql` contains three queries: the top 10 skills overall, the top 10 skills in
+`data` jobs, and the number of jobs per seniority level. Run them with:
+
+```bash
+docker compose exec -T postgres psql -U etl_user -d job_market < sql/analysis.sql
+```
+
+(Windows PowerShell: `Get-Content sql/analysis.sql | docker compose exec -T postgres psql -U etl_user -d job_market`)
+
+```sql
+-- Top 10 skills overall
+SELECT skill, count(*) AS jobs
+FROM job_enrichment, unnest(skills) AS skill
+GROUP BY skill
+ORDER BY jobs DESC, skill
+LIMIT 10;
+
+-- Top 10 skills in data jobs
+SELECT skill, count(*) AS jobs
+FROM job_enrichment, unnest(skills) AS skill
+WHERE category = 'data'
+GROUP BY skill
+ORDER BY jobs DESC, skill
+LIMIT 10;
+
+-- Jobs per seniority level
+SELECT seniority, count(*) AS jobs
+FROM job_enrichment
+GROUP BY seniority
+ORDER BY array_position(ARRAY['intern', 'junior', 'mid', 'senior', 'lead', 'unknown'], seniority);
+```
+
+## Changing the database schema
+
+`sql/init.sql` only runs the first time the database is created (when its Docker volume is
+empty). Editing it does **not** change an existing database. After a schema change, reset the
+database and let the pipeline reload the data:
+
+```bash
+docker compose down -v      # deletes ALL data in the database
+docker compose up --build
+```
+
+Jobs are reloaded from the API automatically. AI enrichments are lost and are recreated over the
+next runs (`ENRICH_LIMIT` jobs per run).
