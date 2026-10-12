@@ -1,0 +1,4 @@
+# Store and check out every text file with LF line endings, on every OS.
+# Without this, Windows (core.autocrlf=true) converts files to CRLF locally,
+# which changes byte-level checksums (e.g. of SQL migrations) between machines.
+* text=auto eol=lf

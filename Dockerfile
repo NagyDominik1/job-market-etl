@@ -1,9 +1,9 @@
 # Image for the ETL pipeline (extract -> transform -> load).
 # Build and run it via Docker Compose:  docker compose up --build
 
-# Official slim Python image, pinned to the 3.14 minor version
-# ("slim" = Debian with only the essentials, so the image stays small).
-FROM python:3.14-slim
+# Official slim Python image, pinned to an exact version (3.14.8) so every
+# build uses the same Python ("slim" = Debian with only the essentials).
+FROM python:3.14.8-slim
 
 # PYTHONDONTWRITEBYTECODE: don't write .pyc cache files (useless in a container).
 # PYTHONUNBUFFERED: send output straight to the terminal/log, without buffering,

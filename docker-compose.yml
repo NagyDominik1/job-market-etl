@@ -10,9 +10,9 @@
 
 services:
   postgres:
-    # Official PostgreSQL image, pinned to major version 17 so the setup
-    # doesn't change unexpectedly when a new major version comes out.
-    image: postgres:17
+    # Official PostgreSQL image, pinned to a minor version (17.11) so every
+    # machine runs exactly the same Postgres. Update it on purpose, not by accident.
+    image: postgres:17.11
     container_name: job-market-postgres
     restart: unless-stopped
 
@@ -24,9 +24,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
     # Expose Postgres on localhost:5432 so tools on your machine
-    # (psql, DBeaver, and later our Python code) can connect to it.
+    # (psql, DBeaver, the Python code) can connect to it. "127.0.0.1:" binds it
+    # to this computer only; without it, other devices on the network could reach it.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
     volumes:
       # Named volume: keeps the database data even if the container is removed.
