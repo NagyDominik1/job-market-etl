@@ -12,3 +12,8 @@ data/raw/
 
 # Local Claude Code settings
 .claude/settings.local.json
+
+# My real manual job lists stay local; only the format description is committed.
+# (An example file is in data/examples/.)
+data/manual/*
+!data/manual/README.md

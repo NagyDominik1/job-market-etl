@@ -3,7 +3,9 @@
 import pytest
 
 from src.extractors import get_enabled_extractors
-from src.extractors.csv_extractor import DEFAULT_CSV_DIR, CsvExtractor, make_external_id
+from src.extractors.csv_extractor import PROJECT_ROOT, CsvExtractor, make_external_id
+
+EXAMPLES_DIR = PROJECT_ROOT / "data" / "examples"
 
 HEADER = "title,company,city,description,url,deadline\n"
 
@@ -90,8 +92,10 @@ def test_missing_folder_gives_no_postings(tmp_path):
     assert CsvExtractor(tmp_path / "does-not-exist").fetch() == []
 
 
+# data/ is not copied into the Docker image, so inside the container this is skipped.
+@pytest.mark.skipif(not EXAMPLES_DIR.is_dir(), reason="data/examples is not available here")
 def test_example_file_is_valid():
-    postings = CsvExtractor(DEFAULT_CSV_DIR).fetch()
+    postings = CsvExtractor(EXAMPLES_DIR).fetch()
     assert len(postings) >= 3
     assert len({p["external_id"] for p in postings}) == len(postings)  # all different
 

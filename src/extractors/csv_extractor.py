@@ -1,4 +1,5 @@
-"""Manual CSV extractor: postings I copy by hand into data/manual/*.csv.
+"""Manual CSV extractor: postings I copy by hand into data/manual/*.csv
+(format: data/manual/README.md, example: data/examples/example.csv).
 
 This is the legal way to include job sites that offer no API or email alert:
 no scraping, I note the posting myself. Required header (any column order):
