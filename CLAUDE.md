@@ -19,19 +19,21 @@ Extractors (email | ats | csv | arbeitnow) → raw_postings (raw JSONB)
 Local: Docker Compose (Postgres + pipeline), one command: docker compose up
 Production (later): GitHub Actions daily run → Supabase Postgres → Vercel React dashboard
 
-## Schema (migrations/001_initial_v2.sql)
+## Schema (migrations/001_initial_v2.sql + 002_transform.sql)
 - sources (id, name UNIQUE, kind CHECK IN ('email','ats','csv','api')) — one row per
   extractor, inserted by the pipeline itself
-- raw_postings (id, source_id FK, external_id, payload JSONB, fetched_at,
-  UNIQUE(source_id, external_id))
+- raw_postings (id, source_id FK, external_id, payload JSONB, fetched_at, last_seen_at,
+  job_id FK -> jobs ON DELETE SET NULL (indexed), transform_error,
+  UNIQUE(source_id, external_id)) — job_id NULL = not transformed yet
 - jobs (id, fingerprint UNIQUE, title, company_name, location, remote, url, description,
-  posted_at, deadline, first_seen_at, last_seen_at) — filled from Phase 2
-- job_sources (job_id FK, raw_posting_id FK, PK both) — n:m link, filled from Phase 2
+  posted_at, deadline, first_seen_at, last_seen_at)
 - job_enrichment (job_id PK FK ON DELETE CASCADE, seniority, category, skills text[],
   match_score 0-100, model, enriched_at) — v1 CHECK constraints kept; `model` is the
   "enriched_by" field ('rule-based' or the Claude model name); filled from Phase 3
-- etl_runs (v1 columns + source_id FK nullable) — one row per source per run;
-  rows_extracted = fetched, rows_loaded = new raw postings
+- etl_runs (v1 columns + source_id FK nullable + step CHECK IN ('extract','transform',
+  'enrich')) — extract: one row per source (rows_extracted = fetched, rows_loaded = new
+  raw postings); transform: one row per run, source_id NULL (rows_extracted = processed,
+  rows_loaded = linked to a job; error_message notes how many postings failed)
 - schema_migrations (version, filename, checksum, applied_at) — managed by src/migrate.py
 
 ## Decisions
@@ -41,11 +43,41 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   check); schema changes go into a new file. Docker no longer runs sql/init.sql.
 - Raw data lives in the database (raw_postings JSONB), not in data/raw files, because a
   GitHub Actions run has no persistent disk. Re-processing reads from raw_postings.
+- Raw upsert: ON CONFLICT DO UPDATE payload + last_seen_at; new vs already seen per row
+  via RETURNING (xmax = 0). Duplicate external_ids within one fetch are dropped first.
 - Extractors only fetch and return {external_id, payload}; they never clean data or touch
-  the database. Registry + SOURCES env var in src/extractors/__init__.py.
-- CSV external_id = SHA-256 of the url, or of normalized title|company|city if no url.
+  the database. Mappers (src/mappers/, one per source name) turn a payload into a
+  NormalizedJob. Registry + SOURCES env var in src/extractors/__init__.py.
+- 1:n instead of a join table: one raw posting belongs to exactly one job, so the FK is
+  raw_postings.job_id (the "many" side). job_sources was dropped in 002.
+- Fingerprint = sha256("company|title|city"), each part normalized (src/normalize.py):
+  fold = lowercase + Serbian Cyrillic -> Latin + no accents (đ -> dj); company: legal
+  forms removed (doo/kft/zrt/gmbh/ltd... anywhere, short ones like ad/ag/inc only at the
+  end); title: gender markers and punctuation removed (+ and # kept); city: aliases
+  (Szabadka = Subotica, Újvidék = Novi Sad, Belgrade/Belgrád = Beograd...), postal codes
+  removed, remote flag or "Remote/Távmunka/Rad od kuće" -> 'remote'. Changing a rule
+  changes fingerprints (test_fingerprint_is_stable guards this).
+- Transform: one transaction per raw posting; failures (mapping error, no title/company)
+  get transform_error and are retried every run. Merge into an existing job: title and
+  first_seen_at kept, COALESCE fills empty fields (never empties them), earliest
+  posted_at; jobs.last_seen_at = max of its raw postings' last_seen_at (only forward).
+- "New jobs" = jobs.first_seen_at >= start of the current pipeline run.
+- Real manual CSVs (data/manual/*) are gitignored; the format is in data/manual/README.md,
+  an example in data/examples/.
+- pandas was removed with the v1 DataFrame transform (row-by-row processing isolates errors).
+- Postgres is bound to 127.0.0.1 only; use POSTGRES_HOST=127.0.0.1, not localhost
+  (Windows tries IPv6 ::1 first and waits 10 s).
 - v2 work happens on the `v2` branch; `main` stays at v1 (tag v1.0).
-- v2 starts with an empty database: run `docker compose down -v` once to drop the v1 volume.
+
+## Known limitations
+- The same job posted with a Hungarian and a Serbian (or English) title is NOT matched
+  ("Adatmérnök" vs "Data Engineer" vs "Inženjer podataka"): the fingerprint compares
+  normalized text, it doesn't translate.
+- Different city spellings outside the alias map, or a company written with/without an
+  extra word ("Nordeus" vs "Nordeus Beograd"), give different fingerprints.
+- Several real openings with the same company + title + city merge into one job.
+- A raw posting is transformed once: if its payload changes later (e.g. new title), the
+  job is not updated (only last_seen_at follows).
 
 ## Phases (work on ONE phase at a time, never start the next one unasked)
 0 Scan + this file
@@ -70,8 +102,7 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   understand for an interview.
 
 ## Current status
-Phase 1 done (branch v2): migrations, v2 schema, Extractor interface, Arbeitnow + CSV
-extractors, multi-source runner writing raw_postings and etl_runs.
-Not wired up yet: src/transform.py, src/load.py and src/enrich.py are v1 code (they still
-use the v1 `slug`-based tables and data/raw files); Phase 2-3 adapt them to the new schema.
-README.md still describes v1 (rewritten in Phase 6).
+Phase 2 done (branch v2): migration 002, raw upsert with last_seen_at, mappers,
+normalization + fingerprint, transform step (raw_postings -> jobs), new-jobs count.
+Not wired up yet: src/enrich.py is v1 code (uses the v1 `slug`-based tables); Phase 3
+adapts it. README.md still describes v1 (rewritten in Phase 6).
