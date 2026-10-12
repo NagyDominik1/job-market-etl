@@ -6,7 +6,14 @@ Plain strings only: no network, no database.
 import pytest
 
 from src.enrich import validate_enrichment
-from src.rules import classify_category, classify_seniority, classify_with_rules, find_skills
+from src.rules import (
+    classify_category,
+    classify_seniority,
+    classify_with_rules,
+    detect_required_languages,
+    detect_years_required,
+    find_skills,
+)
 
 
 # --- Skills ---------------------------------------------------------------------
@@ -132,3 +139,115 @@ def test_rule_based_result_passes_validation():
     assert cleaned["category"] == "data"
     assert len(cleaned["skills"]) == 10  # 12 found, cut to the maximum
     assert cleaned["skills"][:3] == ["Python", "SQL", "Airflow"]
+
+
+# --- Hungarian and Serbian (Latin and Cyrillic) -----------------------------------
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("Gyakornok - PHP fejlesztő", "intern"),
+        ("PHP fejlesztő gyakornoki program", "intern"),
+        ("Pályakezdő Java fejlesztő", "junior"),
+        ("Junior szoftverfejlesztő", "junior"),
+        ("Medior PHP fejlesztő", "mid"),
+        ("Senior .NET fejlesztő", "senior"),
+        ("Csoportvezető", "lead"),
+        ("Praksa - backend", "intern"),
+        ("Praktikant za QA", "intern"),
+        ("Stažista u IT sektoru", "intern"),
+        ("Стажиста за развој софтвера", "intern"),
+        ("Početnik Python programer", "junior"),
+        ("Јуниор програмер", "junior"),
+        ("Medior PHP programer", "mid"),
+        ("Сениор Java инжењер", "senior"),
+    ],
+)
+def test_hungarian_and_serbian_seniority(title, expected):
+    assert classify_seniority(title) == expected
+
+
+@pytest.mark.parametrize("title, expected", [("Adatmérnök", "data"), ("Inženjer podataka", "data")])
+def test_hungarian_and_serbian_category(title, expected):
+    assert classify_category(title) == expected
+
+
+# --- Years of experience ------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("3+ years of experience with PHP", 3),
+        ("Minimum 5 yrs in backend", 5),
+        ("min. 4 years", 4),
+        ("at least 2 years", 2),
+        ("3 years of professional experience", 3),
+        ("2-3 years experience", 2),            # a range: the lower bound
+        ("2 to 4 years of experience", 2),
+        ("3+ év tapasztalat", 3),
+        ("Legalább 2 év szakmai tapasztalat", 2),
+        ("2–4 év tapasztalat", 2),
+        ("3+ godine iskustva", 3),
+        ("najmanje 3 godine radnog iskustva", 3),
+        ("Минимум 3 године искуства", 3),
+        ("mindestens 3 Jahre Berufserfahrung", 3),
+        ("2+ years of Python, 5+ years overall", 5),  # the largest is the real requirement
+    ],
+)
+def test_years_of_experience(text, expected):
+    assert detect_years_required(text) == expected
+
+
+@pytest.mark.parametrize("text", ["18+ years old", "founded 25 years ago", "no numbers here", None])
+def test_text_without_an_experience_requirement(text):
+    assert detect_years_required(text) is None
+
+
+def test_years_decide_seniority_when_the_title_does_not():
+    assert classify_with_rules("Software Engineer", "1+ year of experience")["seniority"] == "junior"
+    assert classify_with_rules("Software Engineer", "4+ years of experience")["seniority"] == "mid"
+    assert classify_with_rules("Software Engineer", "6+ years of experience")["seniority"] == "senior"
+    # The title wins over the years.
+    assert classify_with_rules("Junior Developer", "6+ years of experience")["seniority"] == "junior"
+
+
+# --- Required languages ---------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Fluent German required",
+        "Sehr gute Deutschkenntnisse (C1)",
+        "Tárgyalóképes német nyelvtudás",
+        "Znanje nemačkog jezika",
+        "Знање немачког језика",
+        "Wir suchen dich für unser Team und du bist mit der Entwicklung von Software vertraut. " * 3,
+    ],
+)
+def test_german_is_required(text):
+    assert detect_required_languages(text) == ["german"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "German is a plus",                           # optional
+        "Deutschkenntnisse von Vorteil",
+        "Znanje nemačkog jezika je prednost",
+        "Office in Germany. Fluent English.",         # the country, not the language
+        "Standort Deutschland; fluent English",
+        "Németországi iroda, angol nyelvtudás",
+        "Rad u Nemačkoj, znanje engleskog",
+        "We work with German clients.",               # no requirement cue
+    ],
+)
+def test_german_is_not_required(text):
+    assert detect_required_languages(text) == []
+
+
+def test_profile_skills_are_detected():
+    text = "C#, .NET, Unity3D, PHP, MySQL, REST API, React, JavaScript, HTML/CSS, Git, Java, Python, Docker, PostgreSQL"
+    assert set(find_skills("Developer", text)) >= {
+        "C#", ".NET", "Unity", "PHP", "MySQL", "REST", "React", "JavaScript", "HTML", "CSS",
+        "Git", "Java", "Python", "Docker", "PostgreSQL",
+    }
