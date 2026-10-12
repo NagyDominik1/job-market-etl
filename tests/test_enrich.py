@@ -14,6 +14,9 @@ def test_valid_output_is_returned_cleaned():
         "seniority": "senior",
         "category": "data",
         "skills": ["Python", "PostgreSQL", "Apache Airflow"],
+        # Phase 3 fields; optional in the input, defaults in the output.
+        "years_required": None,
+        "required_languages": [],
     }
 
 
@@ -78,3 +81,27 @@ def test_user_message_is_truncated_and_cannot_close_the_tags():
     assert message.count("</job_description>") == 1
     assert message.endswith("</job_description>")
     assert len(message) < MAX_DESCRIPTION_CHARS + 100
+
+
+# --- years_required and required_languages (Phase 3) -------------------------------
+
+def test_years_and_languages_are_validated_and_cleaned():
+    data = {
+        "seniority": "junior", "category": "backend", "skills": [],
+        "years_required": 2, "required_languages": ["German", " english ", "german", "C++"],
+    }
+    cleaned = validate_enrichment(data)
+    assert cleaned["years_required"] == 2
+    assert cleaned["required_languages"] == ["english", "german"]  # lowercase, unique, sorted, words only
+
+
+def test_years_and_languages_are_optional():
+    cleaned = validate_enrichment({"seniority": "mid", "category": "qa", "skills": []})
+    assert cleaned["years_required"] is None
+    assert cleaned["required_languages"] == []
+
+
+@pytest.mark.parametrize("years", [-1, 51, "3", 2.5, True])
+def test_bad_years_are_rejected(years):
+    with pytest.raises(ValueError, match="years_required"):
+        validate_enrichment({"seniority": "mid", "category": "qa", "skills": [], "years_required": years})

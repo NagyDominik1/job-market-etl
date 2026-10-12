@@ -33,21 +33,23 @@ def finish_run_success(
     rows_extracted: int,
     rows_loaded: int,
     message: str | None = None,
+    rows_enriched: int | None = None,
 ) -> None:
     """Mark the run as successful and store the row counts.
 
     `message` is stored in error_message: a successful transform uses it to
-    say how many single postings could not be transformed.
+    say how many single postings could not be transformed, the enrich step
+    for its summary (rules / Claude / failed Claude calls).
     """
     with conn.transaction():
         conn.execute(
             """
             UPDATE etl_runs
             SET finished_at = now(), status = 'success',
-                rows_extracted = %s, rows_loaded = %s, error_message = %s
+                rows_extracted = %s, rows_loaded = %s, rows_enriched = %s, error_message = %s
             WHERE id = %s
             """,
-            (rows_extracted, rows_loaded, message, run_id),
+            (rows_extracted, rows_loaded, rows_enriched, message, run_id),
         )
 
 
