@@ -1,15 +1,18 @@
-"""Pipeline runner (v2, Phase 1): run every enabled source and store its raw postings.
+"""Pipeline runner (v2): extract every source, then transform into deduplicated jobs.
 
     1. apply pending database migrations (src/migrate.py)
     2. mark runs left 'running' by a killed process as failed
-    3. for each source in SOURCES: fetch -> insert into raw_postings,
-       logged as one etl_runs row per source
+    3. EXTRACT: for each source in SOURCES: fetch -> upsert into raw_postings,
+       logged as one etl_runs row per source (step 'extract')
+    4. TRANSFORM: pending raw postings -> jobs (src/transform.py),
+       one etl_runs row (step 'transform')
+    5. log how many jobs are new in this run
 
-One failing source does NOT stop the others. The exit code is 1 if any source
-failed, so a scheduler (cron, GitHub Actions) can see that something went wrong.
+One failing source does NOT stop the others, and the transform still runs on
+whatever was extracted. The exit code is 1 if any step failed, so a scheduler
+(cron, GitHub Actions) can see that something went wrong.
 
-The v1 transform / load / enrich steps are not run for now: they are
-reconnected to the new tables in Phase 2 and 3.
+The enrich step (src/enrich.py) is reconnected in Phase 3.
 
 Run it with:
     .venv\\Scripts\\python -m src.main
@@ -26,6 +29,7 @@ from src.extractors import Extractor, get_enabled_extractors
 from src.migrate import apply_migrations
 from src.raw_postings import register_source, save_raw_postings
 from src.runs import finish_run_failed, finish_run_success, mark_stuck_runs_failed, start_run
+from src.transform import count_new_jobs, transform
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +83,35 @@ def run_source(conn: psycopg.Connection, extractor: Extractor) -> bool:
         return False
 
 
+def run_transform(conn: psycopg.Connection) -> bool:
+    """Run the transform step as its own etl_runs row. Returns True on success.
+
+    Single postings that fail don't fail the step: they get a transform_error,
+    and their number is noted in the run's error_message.
+    """
+    try:
+        run_id = start_run(conn, "transform")
+    except psycopg.Error as error:
+        logger.error("Could not start the transform run: %s", error)
+        return False
+
+    try:
+        counts = transform(conn)
+        message = None
+        if counts["errors"]:
+            message = f"{counts['errors']} raw posting(s) not transformed, see raw_postings.transform_error"
+        # rows_extracted = raw postings processed, rows_loaded = linked to a job.
+        finish_run_success(conn, run_id, counts["processed"], counts["linked"], message)
+        return True
+    except Exception as error:
+        logger.exception("Transform (run id=%d) failed", run_id)
+        try:
+            finish_run_failed(conn, run_id, f"{type(error).__name__}: {error}", None)
+        except psycopg.Error:
+            logger.exception("Could not record the failure in etl_runs")
+        return False
+
+
 def run_pipeline() -> None:
     """Run all enabled sources once. Exits with code 1 if anything failed."""
     try:
@@ -100,13 +133,26 @@ def run_pipeline() -> None:
             logger.error("Could not prepare the database: %s", error)
             sys.exit(1)
 
+        # The database's clock, so it compares correctly with jobs.first_seen_at.
+        run_started_at = conn.execute("SELECT now()").fetchone()[0]
+
         # Each source runs on its own; a failure is recorded and we go on.
         failed = [extractor.name for extractor in extractors if not run_source(conn, extractor)]
 
+        if not run_transform(conn):
+            failed.append("transform")
+
+        try:
+            # "New" = first seen during THIS run (since it started).
+            logger.info("New jobs in this run: %d", count_new_jobs(conn, run_started_at))
+        except psycopg.Error as error:
+            logger.error("Could not count the new jobs: %s", error)
+            failed.append("new-jobs count")
+
     if failed:
-        logger.error("Finished with failed source(s): %s", ", ".join(failed))
+        logger.error("Finished with failed step(s): %s", ", ".join(failed))
         sys.exit(1)
-    logger.info("Finished: all %d source(s) succeeded", len(extractors))
+    logger.info("Finished: all %d source(s) and the transform succeeded", len(extractors))
 
 
 def main() -> None:
