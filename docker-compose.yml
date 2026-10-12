@@ -68,11 +68,13 @@ services:
       postgres:
         condition: service_healthy
 
-    # Share the manual CSV folder with the container (read by the csv source).
-    # ":ro" = read-only: the pipeline only reads it. Raw data is stored in
+    # Share the manual CSV folder (read by the csv source) and the config
+    # folder (my profile.yaml for the match score) with the container.
+    # ":ro" = read-only: the pipeline only reads them. Raw data is stored in
     # the database, not in files.
     volumes:
       - ./data/manual:/app/data/manual:ro
+      - ./config:/app/config:ro
 
     # A batch job: it runs once and exits. "no" = never restart it automatically
     # (this is the default; written out here to make it explicit).

@@ -1,0 +1,19 @@
+# Example profile with made-up values. Copy it to config/profile.yaml (gitignored)
+# and put your own values there:  cp config/profile.example.yaml config/profile.yaml
+# If profile.yaml is missing, the pipeline uses this file and logs a warning.
+
+skills:            # 1 = basics, 2 = used in a project, 3 = confident
+  Python: 3        # any skill name; common spellings are matched (postgres = PostgreSQL)
+  SQL: 3
+  PostgreSQL: 2
+  REST API: 2
+  HTML/CSS: 1      # "/" = either one counts (HTML or CSS)
+  Docker: 1
+seniority: [junior, mid]                   # intern, junior, mid, senior, lead
+cities: [Budapest, Debrecen, remote]       # order = priority; "remote" = remote jobs
+languages: {hungarian: native, english: good}   # informational
+preferred_roles: [data engineer, python developer, backend]   # words looked for in job titles
+dealbreakers:                              # any of these -> score 0
+  title_keywords: [principal, director]    # title contains one of these words
+  min_years_required: 5                    # the job asks for this many years or more
+  required_languages_missing: [german, french]   # the job requires one of these languages

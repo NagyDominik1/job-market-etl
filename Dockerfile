@@ -34,6 +34,9 @@ RUN useradd --create-home app
 # The files are owned by root, so the "app" user can read but not modify them.
 COPY src/ ./src/
 COPY migrations/ ./migrations/
+# Only the example profile goes into the image; my real profile.yaml is
+# personal and is mounted at run time (see docker-compose.yml).
+COPY config/profile.example.yaml ./config/
 COPY tests/ ./tests/
 
 # From here on (including when the container runs), use the "app" user.

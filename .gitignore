@@ -17,3 +17,6 @@ data/raw/
 # (An example file is in data/examples/.)
 data/manual/*
 !data/manual/README.md
+
+# My real job-search profile stays local; config/profile.example.yaml is committed.
+config/profile.yaml
