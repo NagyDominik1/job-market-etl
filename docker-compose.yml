@@ -29,13 +29,11 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
 
+    # Named volume: keeps the database data even if the container is removed.
+    # The tables are NOT created here: the pipeline applies the SQL files in
+    # migrations/ when it starts (src/migrate.py), the same way in production.
     volumes:
-      # Named volume: keeps the database data even if the container is removed.
       - pgdata:/var/lib/postgresql/data
-      # Scripts in /docker-entrypoint-initdb.d/ run ONCE, only when the
-      # database is created for the first time (i.e. the volume is empty).
-      # ":ro" = read-only, the container cannot modify our file.
-      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
 
     # Healthcheck: Docker runs pg_isready periodically to see whether
     # Postgres is accepting connections. `docker compose ps` shows the result.

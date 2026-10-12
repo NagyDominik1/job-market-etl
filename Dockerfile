@@ -35,6 +35,7 @@ RUN useradd --create-home app \
 # Now copy our code (these layers are rebuilt whenever the code changes).
 # The files are owned by root, so the "app" user can read but not modify them.
 COPY src/ ./src/
+COPY migrations/ ./migrations/
 COPY tests/ ./tests/
 
 # From here on (including when the container runs), use the "app" user.
