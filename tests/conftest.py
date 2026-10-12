@@ -35,8 +35,7 @@ def db_conn(database_available):
         pytest.skip("PostgreSQL is not reachable (start it with: docker compose up -d postgres)")
 
     schema = f"test_{uuid.uuid4().hex[:12]}"
-    with get_connection() as conn:
-        conn.autocommit = True
+    with get_connection(autocommit=True) as conn:
         conn.execute(f"CREATE SCHEMA {schema}")
         conn.execute(f"SET search_path TO {schema}")
         try:

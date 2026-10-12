@@ -150,8 +150,7 @@ def apply_migrations(conn: psycopg.Connection, migrations_dir: Path = MIGRATIONS
 
 def migrate() -> list[str]:
     """Open a connection and apply all pending migrations."""
-    with get_connection() as conn:
-        conn.autocommit = True
+    with get_connection(autocommit=True) as conn:
         return apply_migrations(conn)
 
 

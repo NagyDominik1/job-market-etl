@@ -25,12 +25,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Security: don't run as root. Create a normal user "app" and give it the
-# data/ folder, the only place the pipeline writes to. (This step is also
-# placed before the code COPY, so it stays cached when the code changes.)
-RUN useradd --create-home app \
-    && mkdir -p /app/data \
-    && chown app:app /app/data
+# Security: don't run as root. Create a normal user "app". The pipeline
+# writes nothing to disk (raw data goes to the database), so it needs no
+# writable folder. (Placed before the code COPY, so it stays cached.)
+RUN useradd --create-home app
 
 # Now copy our code (these layers are rebuilt whenever the code changes).
 # The files are owned by root, so the "app" user can read but not modify them.

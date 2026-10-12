@@ -68,10 +68,11 @@ services:
       postgres:
         condition: service_healthy
 
-    # Share ./data with the container, so raw JSON files written to
-    # /app/data/raw inside the container end up in ./data/raw on your computer.
+    # Share the manual CSV folder with the container (read by the csv source).
+    # ":ro" = read-only: the pipeline only reads it. Raw data is stored in
+    # the database, not in files.
     volumes:
-      - ./data:/app/data
+      - ./data/manual:/app/data/manual:ro
 
     # A batch job: it runs once and exits. "no" = never restart it automatically
     # (this is the default; written out here to make it explicit).

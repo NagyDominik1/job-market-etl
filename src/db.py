@@ -26,7 +26,7 @@ REQUIRED_VARIABLES = [
 ]
 
 
-def get_connection() -> psycopg.Connection:
+def get_connection(autocommit: bool = False) -> psycopg.Connection:
     """Open a new connection to the PostgreSQL database.
 
     Use it in a "with" block, which commits on success, rolls back on error
@@ -34,6 +34,11 @@ def get_connection() -> psycopg.Connection:
 
         with get_connection() as conn:
             conn.execute("SELECT 1")
+
+    autocommit=True: every statement is committed on its own, and each
+    "with conn.transaction():" block is a real, separate transaction. Without
+    it, the first statement silently opens a transaction that stays open, and
+    later "with conn.transaction():" blocks become parts of it (savepoints).
     """
     # Collect ALL missing variables first, so the error lists them together.
     missing = [name for name in REQUIRED_VARIABLES if not os.environ.get(name)]
@@ -50,4 +55,5 @@ def get_connection() -> psycopg.Connection:
         user=os.environ["POSTGRES_USER"],
         password=os.environ["POSTGRES_PASSWORD"],
         connect_timeout=10,  # seconds; fail fast if the database isn't running
+        autocommit=autocommit,
     )

@@ -1,4 +1,15 @@
-"""Pipeline runner: extract -> transform -> load -> enrich, logged in the etl_runs table.
+"""Pipeline runner (v2, Phase 1): run every enabled source and store its raw postings.
+
+    1. apply pending database migrations (src/migrate.py)
+    2. mark runs left 'running' by a killed process as failed
+    3. for each source in SOURCES: fetch -> insert into raw_postings,
+       logged as one etl_runs row per source
+
+One failing source does NOT stop the others. The exit code is 1 if any source
+failed, so a scheduler (cron, GitHub Actions) can see that something went wrong.
+
+The v1 transform / load / enrich steps are not run for now: they are
+reconnected to the new tables in Phase 2 and 3.
 
 Run it with:
     .venv\\Scripts\\python -m src.main
@@ -11,10 +22,10 @@ import psycopg
 import requests
 
 from src.db import get_connection
-from src.enrich import enrich
-from src.extract import extract
-from src.load import load_jobs
-from src.transform import load_raw, transform
+from src.extractors import Extractor, get_enabled_extractors
+from src.migrate import apply_migrations
+from src.raw_postings import register_source, save_raw_postings
+from src.runs import finish_run_failed, finish_run_success, mark_stuck_runs_failed, start_run
 
 logger = logging.getLogger(__name__)
 
@@ -24,116 +35,76 @@ logger = logging.getLogger(__name__)
 EXPECTED_ERRORS = (requests.RequestException, psycopg.Error, OSError, ValueError, RuntimeError)
 
 
-# --- Recording runs in etl_runs ---------------------------------------------
-# Each function opens its OWN short connection. "with get_connection()" commits
-# when the block ends, so the etl_runs row is saved immediately and does not
-# depend on the data load. Even if the load is rolled back, the 'failed'
-# record written here stays in the table.
+def run_source(conn: psycopg.Connection, extractor: Extractor) -> bool:
+    """Fetch one source and store its new postings. Returns True on success.
 
-def start_run() -> int:
-    """Insert a 'running' row into etl_runs and return its id."""
-    with get_connection() as conn:
-        # RETURNING id gives us back the id the database generated.
-        cursor = conn.execute("INSERT INTO etl_runs (status) VALUES ('running') RETURNING id")
-        run_id = cursor.fetchone()[0]
-    logger.info("Started ETL run id=%d", run_id)
-    return run_id
-
-
-def finish_run_success(run_id: int, rows_extracted: int, rows_loaded: int, rows_enriched: int | None) -> None:
-    """Mark the run as successful and store the row counts."""
-    with get_connection() as conn:
-        conn.execute(
-            """
-            UPDATE etl_runs
-            SET finished_at = now(), status = 'success',
-                rows_extracted = %s, rows_loaded = %s, rows_enriched = %s
-            WHERE id = %s
-            """,
-            (rows_extracted, rows_loaded, rows_enriched, run_id),
-        )
-
-
-def finish_run_failed(run_id: int, error_message: str, rows_extracted: int | None) -> None:
-    """Mark the run as failed and store the error message."""
-    with get_connection() as conn:
-        conn.execute(
-            """
-            UPDATE etl_runs
-            SET finished_at = now(), status = 'failed',
-                rows_extracted = %s, error_message = %s
-            WHERE id = %s
-            """,
-            (rows_extracted, error_message, run_id),
-        )
-
-
-# --- The pipeline -------------------------------------------------------------
-
-def run_enrichment() -> int | None:
-    """Run the enrich step. Never raises: returns the count, or None if it crashed.
-
-    Enrichment is optional extra data. When it runs, the jobs are already
-    loaded, so a problem here is only logged as a warning and does NOT mark
-    the whole run as failed.
+    Never raises: any error is logged and recorded in etl_runs, so the caller
+    can simply go on with the next source.
     """
     try:
-        with get_connection() as conn:
-            return enrich(conn)
-    except Exception:
-        logger.warning("AI enrichment failed; the data load was not affected", exc_info=True)
-        return None
+        source_id = register_source(conn, extractor)
+        run_id = start_run(conn, source_id)
+    except psycopg.Error as error:
+        # Without a run row there is nowhere to record the failure.
+        logger.error("Source %s: could not start the run: %s", extractor.name, error)
+        return False
 
-
-def run_pipeline() -> None:
-    """Run extract -> transform -> load once and record the result in etl_runs."""
-    # If we can't even write the 'running' row (e.g. the database is down),
-    # there is nothing to record the failure in, so just log it and stop.
+    rows_extracted = None  # stays None if fetch() fails
     try:
-        run_id = start_run()
-    except (psycopg.Error, RuntimeError) as error:
-        logger.error("Could not start the ETL run. Is the database running? %s", error)
-        sys.exit(1)
-
-    rows_extracted = None  # stays None if the extract step fails
-    try:
-        # EXTRACT: download the jobs and save them to data/raw/
-        raw_path = extract()
-
-        # TRANSFORM: read that exact file back and clean it
-        jobs = load_raw(raw_path)
-        rows_extracted = len(jobs)
-        df = transform(jobs)
-
-        # LOAD: upsert into the jobs table (its own connection and transaction)
-        with get_connection() as conn:
-            counts = load_jobs(conn, df)
-
-        rows_loaded = counts["inserted"] + counts["updated"]
-
-        # ENRICH: classify new jobs with Claude (optional, never fails the run)
-        rows_enriched = run_enrichment()
-
-        finish_run_success(run_id, rows_extracted, rows_loaded, rows_enriched)
+        postings = extractor.fetch()
+        rows_extracted = len(postings)
+        new = save_raw_postings(conn, source_id, postings)
+        finish_run_success(conn, run_id, rows_extracted, new)
         logger.info(
-            "ETL run id=%d succeeded: extracted=%d, loaded=%d (inserted=%d, updated=%d), enriched=%s",
-            run_id, rows_extracted, rows_loaded, counts["inserted"], counts["updated"], rows_enriched,
+            "Source %s (run id=%d): fetched=%d, new=%d, already seen=%d",
+            extractor.name, run_id, rows_extracted, new, rows_extracted - new,
         )
+        return True
 
-    # "except Exception" catches every normal error from any step, so the
-    # run is always marked as failed instead of staying 'running' forever.
+    # "except Exception" catches every normal error, so the run is always
+    # marked as failed instead of staying 'running' forever.
     except Exception as error:
         error_message = f"{type(error).__name__}: {error}"
         if isinstance(error, EXPECTED_ERRORS):
-            logger.error("ETL run id=%d failed: %s", run_id, error_message)
+            logger.error("Source %s (run id=%d) failed: %s", extractor.name, run_id, error_message)
         else:
             # logger.exception also prints the traceback (where the error happened).
-            logger.exception("ETL run id=%d failed with an unexpected error", run_id)
+            logger.exception("Source %s (run id=%d) failed with an unexpected error", extractor.name, run_id)
         try:
-            finish_run_failed(run_id, error_message, rows_extracted)
-        except Exception:
+            finish_run_failed(conn, run_id, error_message, rows_extracted)
+        except psycopg.Error:
             logger.exception("Could not record the failure in etl_runs")
+        return False
+
+
+def run_pipeline() -> None:
+    """Run all enabled sources once. Exits with code 1 if anything failed."""
+    try:
+        # Read SOURCES first: a typo there should stop us before any work.
+        extractors = get_enabled_extractors()
+        # autocommit: each helper function commits its own transaction.
+        conn = get_connection(autocommit=True)
+    except EXPECTED_ERRORS as error:
+        logger.error("Could not start the pipeline: %s", error)
         sys.exit(1)
+
+    with conn:
+        try:
+            apply_migrations(conn)
+            stuck = mark_stuck_runs_failed(conn)
+            if stuck:
+                logger.warning("Marked %d old run(s) stuck in 'running' as failed", stuck)
+        except EXPECTED_ERRORS as error:
+            logger.error("Could not prepare the database: %s", error)
+            sys.exit(1)
+
+        # Each source runs on its own; a failure is recorded and we go on.
+        failed = [extractor.name for extractor in extractors if not run_source(conn, extractor)]
+
+    if failed:
+        logger.error("Finished with failed source(s): %s", ", ".join(failed))
+        sys.exit(1)
+    logger.info("Finished: all %d source(s) succeeded", len(extractors))
 
 
 def main() -> None:
