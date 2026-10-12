@@ -218,6 +218,9 @@ def test_years_decide_seniority_when_the_title_does_not():
     [
         "Fluent German required",
         "Sehr gute Deutschkenntnisse (C1)",
+        "Fließend Deutsch in Wort und Schrift",
+        "You have excellent German and English language skills (C1)",
+        "Business-fluent German",
         "Tárgyalóképes német nyelvtudás",
         "Znanje nemačkog jezika",
         "Знање немачког језика",
@@ -239,6 +242,8 @@ def test_german_is_required(text):
         "Németországi iroda, angol nyelvtudás",
         "Rad u Nemačkoj, znanje engleskog",
         "We work with German clients.",               # no requirement cue
+        "We serve thousands of businesses, from startups to Deutsche Telekom.",  # a company name
+        "German fluency would be ideal for local paperwork.",                   # a wish, not a must
     ],
 )
 def test_german_is_not_required(text):

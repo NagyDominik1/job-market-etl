@@ -250,18 +250,23 @@ def detect_years_required(text: str | None) -> int | None:
 # The endings are spelled out so country names don't match: "Germany",
 # "Deutschland", "Németország", "Nemačka" (Germany) are places, not languages.
 LANGUAGE_WORDS = {
-    "german": r"\b(?:german\b|deutsch(?!land)\w*|nemet(?:ul|\b)|n(?:j)?emack(?:i|og|om)\b|allemand)",
+    # "deutsch" only as the language ("Deutsch", "Deutschkenntnisse"), not
+    # "Deutsche Telekom" / "Deutsche Bahn".
+    "german": r"\b(?:german\b|deutsch(?:kenntnisse|sprachig\w*|niveau)?\b|nemet(?:ul|\b)"
+              r"|n(?:j)?emack(?:i|og|om)\b|allemand)",
     "french": r"\b(?:french\b|francais|franzosisch\w*|francia(?:ul|\b)|francusk(?:i|og|om)\b)",
 }
 # Words that make a mention a REQUIREMENT ("fluent German", "Deutschkenntnisse C1").
 REQUIRED_CUES = re.compile(
-    r"fluen|native|business|proficien|excellent|very good|strong|good command|written and spoken"
+    r"fluen|native|business[- ](?:level|fluent|fluency|proficien)|proficien|excellent|very good|strong"
+    r"|good command|written and spoken"
     r"|required|must|mandatory|\b[bc][12]\b|kenntnisse|fliessend|verhandlungssicher|sehr gut"
     r"|targyalokepes|nyelvtudas|nyelvismeret|szintu|tecno|znanje|poznavanje|jezik"
 )
 # Words that make it optional ("German is a plus", "Deutsch von Vorteil").
 OPTIONAL_CUES = re.compile(
     r"\bplus\b|nice to have|advantage|asset|preferred|beneficial|bonus|von vorteil|wunschenswert"
+    r"|would be|\bideal|helpful|desirable"
     r"|elony|prednost|pozeljn"
 )
 # Very common words of a language: a description full of them is WRITTEN in that
