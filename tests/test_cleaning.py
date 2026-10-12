@@ -1,29 +1,11 @@
-"""Tests for src/transform.py. Run with:  .venv\\Scripts\\python -m pytest
+"""Tests for the value cleaners in src/cleaning.py (from the v1 transform step).
 
-All tests use small hand-made data: no network, no files.
+All tests use small hand-made values: no network, no files, no database.
+The v1 tests of the pandas transform() function were ported to
+tests/test_mappers.py, because that function was replaced by the mappers.
 """
 
-import pandas as pd
-
-from src.transform import FINAL_COLUMNS, clean_description, clean_title, transform
-
-
-def make_job(**overrides) -> dict:
-    """Return a valid raw job dict. Pass keyword arguments to change fields."""
-    job = {
-        "slug": "python-developer-berlin-1",
-        "company_name": "Example GmbH",
-        "title": "Python Developer",
-        "description": "<p>Hello</p>",
-        "remote": False,
-        "url": "https://example.com/jobs/1",
-        "tags": ["Python"],
-        "job_types": ["full time"],
-        "location": "Berlin",
-        "created_at": 1700000000,
-    }
-    job.update(overrides)
-    return job
+from src.cleaning import clean_bool, clean_description, clean_text, clean_title
 
 
 # --- clean_description ------------------------------------------------------
@@ -95,51 +77,22 @@ def test_title_with_only_marker_becomes_none():
     assert clean_title(" (m/w/d) ") is None
 
 
-# --- transform ------------------------------------------------------------------
-
-def test_unix_timestamp_is_converted_to_utc_datetime():
-    df = transform([make_job(created_at=1700000000)])
-    assert df.loc[0, "posted_at"] == pd.Timestamp("2023-11-14 22:13:20", tz="UTC")
+def test_serbian_gender_markers_are_removed_from_titles():
+    assert clean_title("Programer (m/ž)") == "Programer"
+    assert clean_title("Programer (M/Ž)") == "Programer"
 
 
-def test_duplicate_slugs_are_removed_keeping_first():
-    jobs = [
-        make_job(slug="a", title="First"),
-        make_job(slug="a", title="Second"),
-        make_job(slug="b", title="Other"),
-    ]
-    df = transform(jobs)
-    assert list(df["slug"]) == ["a", "b"]
-    assert df.loc[0, "title"] == "First"
+# --- clean_text / clean_bool ----------------------------------------------------
+
+def test_clean_text_strips_and_turns_empty_into_none():
+    assert clean_text("  Example GmbH  ") == "Example GmbH"
+    assert clean_text("   ") is None
+    assert clean_text(None) is None
+    assert clean_text(42) is None
 
 
-def test_rows_without_slug_or_title_are_dropped():
-    jobs = [
-        make_job(slug="ok"),
-        make_job(slug=None),
-        make_job(slug="   "),  # only whitespace counts as missing too
-        make_job(slug="no-title", title=""),
-    ]
-    df = transform(jobs)
-    assert list(df["slug"]) == ["ok"]
-
-
-def test_missing_tags_become_empty_list():
-    job_without_tags = make_job(slug="a")
-    del job_without_tags["tags"]
-    jobs = [job_without_tags, make_job(slug="b", tags=None, job_types=None)]
-    df = transform(jobs)
-    assert df.loc[0, "tags"] == []
-    assert df.loc[1, "tags"] == []
-    assert df.loc[1, "job_types"] == []
-
-
-def test_empty_strings_become_none_and_text_is_stripped():
-    df = transform([make_job(company_name="  Example GmbH  ", location="")])
-    assert df.loc[0, "company_name"] == "Example GmbH"
-    assert df.loc[0, "location"] is None
-
-
-def test_output_columns_match_jobs_table():
-    df = transform([make_job(extra_field="ignored")])
-    assert list(df.columns) == FINAL_COLUMNS
+def test_clean_bool_only_accepts_real_booleans():
+    assert clean_bool(True) is True
+    assert clean_bool(False) is False
+    assert clean_bool("true") is None
+    assert clean_bool(None) is None
