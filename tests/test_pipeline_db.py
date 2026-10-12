@@ -46,24 +46,47 @@ def test_register_source_returns_the_same_id_every_time(conn):
     assert register_source(conn, OtherFakeExtractor()) != first
 
 
-def test_only_new_postings_are_inserted(conn):
+def test_new_and_already_seen_postings_are_counted(conn):
     source_id = register_source(conn, FakeExtractor())
-    assert save_raw_postings(conn, source_id, [posting("a"), posting("b")]) == 2
+    assert save_raw_postings(conn, source_id, [posting("a"), posting("b")]) == {
+        "new": 2, "already_seen": 0, "duplicates": 0,
+    }
     # Second run: "a" and "b" were already seen, only "c" is new.
-    assert save_raw_postings(conn, source_id, [posting("a"), posting("b"), posting("c")]) == 1
+    assert save_raw_postings(conn, source_id, [posting("a"), posting("b"), posting("c")]) == {
+        "new": 1, "already_seen": 2, "duplicates": 0,
+    }
     assert conn.execute("SELECT count(*) FROM raw_postings").fetchone()[0] == 3
+
+
+def test_seen_again_updates_payload_and_last_seen_at(conn):
+    source_id = register_source(conn, FakeExtractor())
+    save_raw_postings(conn, source_id, [posting("a", title="Old title")])
+    conn.execute("UPDATE raw_postings SET last_seen_at = now() - interval '1 day'")
+
+    save_raw_postings(conn, source_id, [posting("a", title="New title")])
+    title, seen_recently, first_fetch_kept = conn.execute(
+        """
+        SELECT payload->>'title', last_seen_at > now() - interval '1 minute', fetched_at < last_seen_at
+        FROM raw_postings
+        """
+    ).fetchone()
+    assert (title, seen_recently, first_fetch_kept) == ("New title", True, True)
 
 
 def test_duplicates_within_one_batch_are_stored_once(conn):
     source_id = register_source(conn, FakeExtractor())
-    assert save_raw_postings(conn, source_id, [posting("a"), posting("a")]) == 1
+    assert save_raw_postings(conn, source_id, [posting("a", "first"), posting("a", "second")]) == {
+        "new": 1, "already_seen": 0, "duplicates": 1,
+    }
+    # The first one is kept.
+    assert conn.execute("SELECT payload->>'title' FROM raw_postings").fetchone()[0] == "first"
 
 
 def test_same_external_id_from_another_source_is_new(conn):
     first = register_source(conn, FakeExtractor())
     second = register_source(conn, OtherFakeExtractor())
     save_raw_postings(conn, first, [posting("a")])
-    assert save_raw_postings(conn, second, [posting("a")]) == 1
+    assert save_raw_postings(conn, second, [posting("a")])["new"] == 1
 
 
 def test_payload_is_stored_as_jsonb(conn):
@@ -75,12 +98,12 @@ def test_payload_is_stored_as_jsonb(conn):
 
 def test_empty_result_is_fine(conn):
     source_id = register_source(conn, FakeExtractor())
-    assert save_raw_postings(conn, source_id, []) == 0
+    assert save_raw_postings(conn, source_id, []) == {"new": 0, "already_seen": 0, "duplicates": 0}
 
 
 def test_only_old_running_runs_are_marked_failed(conn):
-    old_run = start_run(conn, None)
-    new_run = start_run(conn, None)
+    old_run = start_run(conn, "transform")
+    new_run = start_run(conn, "transform")
     conn.execute("UPDATE etl_runs SET started_at = now() - interval '2 hours' WHERE id = %s", (old_run,))
 
     assert mark_stuck_runs_failed(conn) == 1
@@ -97,12 +120,12 @@ def test_failing_source_is_recorded_and_does_not_stop_the_next_one(conn):
 
     rows = conn.execute(
         """
-        SELECT s.name, r.status, r.rows_extracted, r.rows_loaded, r.error_message
+        SELECT s.name, r.step, r.status, r.rows_extracted, r.rows_loaded, r.error_message
         FROM etl_runs r JOIN sources s ON s.id = r.source_id
         ORDER BY r.id
         """
     ).fetchall()
     assert rows == [
-        ("fake", "failed", None, None, "ValueError: API is down"),
-        ("other-fake", "success", 2, 2, None),
+        ("fake", "extract", "failed", None, None, "ValueError: API is down"),
+        ("other-fake", "extract", "success", 2, 2, None),
     ]

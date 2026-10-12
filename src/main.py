@@ -43,7 +43,7 @@ def run_source(conn: psycopg.Connection, extractor: Extractor) -> bool:
     """
     try:
         source_id = register_source(conn, extractor)
-        run_id = start_run(conn, source_id)
+        run_id = start_run(conn, "extract", source_id)
     except psycopg.Error as error:
         # Without a run row there is nowhere to record the failure.
         logger.error("Source %s: could not start the run: %s", extractor.name, error)
@@ -53,11 +53,13 @@ def run_source(conn: psycopg.Connection, extractor: Extractor) -> bool:
     try:
         postings = extractor.fetch()
         rows_extracted = len(postings)
-        new = save_raw_postings(conn, source_id, postings)
-        finish_run_success(conn, run_id, rows_extracted, new)
+        counts = save_raw_postings(conn, source_id, postings)
+        # rows_loaded = NEW raw postings; rows_extracted - rows_loaded = already
+        # seen + duplicates within this fetch.
+        finish_run_success(conn, run_id, rows_extracted, counts["new"])
         logger.info(
-            "Source %s (run id=%d): fetched=%d, new=%d, already seen=%d",
-            extractor.name, run_id, rows_extracted, new, rows_extracted - new,
+            "Source %s (run id=%d): fetched=%d, new=%d, already seen=%d, duplicates in this fetch=%d",
+            extractor.name, run_id, rows_extracted, counts["new"], counts["already_seen"], counts["duplicates"],
         )
         return True
 

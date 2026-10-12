@@ -95,5 +95,5 @@ def test_editing_an_applied_migration_is_detected(db_conn, tmp_path):
 
 def test_real_migrations_create_the_v2_schema(db_conn):
     apply_migrations(db_conn)
-    for table in ["sources", "raw_postings", "jobs", "job_sources", "job_enrichment", "etl_runs"]:
+    for table in ["sources", "raw_postings", "jobs", "job_enrichment", "etl_runs"]:
         assert table_exists(db_conn, table), table

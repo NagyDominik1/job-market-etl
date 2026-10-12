@@ -1,9 +1,13 @@
-"""The etl_runs table: a log of every pipeline run (one row per source per run).
+"""The etl_runs table: a log of every pipeline step.
 
-Every function takes an open connection and commits its own short
+One row per source for the extract step (source_id set), and one row per
+run for the steps that work on all sources at once (transform, later enrich;
+source_id NULL). The `step` column says which one it is.
+
+Every function takes an autocommit connection and commits its own short
 transaction, so a run's row is saved immediately and does not depend on the
-data work: even if storing the postings is rolled back, the 'failed' record
-written here stays in the table.
+data work: even if the data work is rolled back, the 'failed' record written
+here stays in the table.
 """
 
 import psycopg
@@ -13,27 +17,37 @@ import psycopg
 STUCK_RUN_AFTER = "1 hour"
 
 
-def start_run(conn: psycopg.Connection, source_id: int | None) -> int:
-    """Insert a 'running' row and return its id."""
+def start_run(conn: psycopg.Connection, step: str, source_id: int | None = None) -> int:
+    """Insert a 'running' row for this step and return its id."""
     with conn.transaction():
         # RETURNING id gives us back the id the database generated.
         return conn.execute(
-            "INSERT INTO etl_runs (source_id, status) VALUES (%s, 'running') RETURNING id",
-            (source_id,),
+            "INSERT INTO etl_runs (step, source_id, status) VALUES (%s, %s, 'running') RETURNING id",
+            (step, source_id),
         ).fetchone()[0]
 
 
-def finish_run_success(conn: psycopg.Connection, run_id: int, rows_extracted: int, rows_loaded: int) -> None:
-    """Mark the run as successful and store the row counts."""
+def finish_run_success(
+    conn: psycopg.Connection,
+    run_id: int,
+    rows_extracted: int,
+    rows_loaded: int,
+    message: str | None = None,
+) -> None:
+    """Mark the run as successful and store the row counts.
+
+    `message` is stored in error_message: a successful transform uses it to
+    say how many single postings could not be transformed.
+    """
     with conn.transaction():
         conn.execute(
             """
             UPDATE etl_runs
             SET finished_at = now(), status = 'success',
-                rows_extracted = %s, rows_loaded = %s
+                rows_extracted = %s, rows_loaded = %s, error_message = %s
             WHERE id = %s
             """,
-            (rows_extracted, rows_loaded, run_id),
+            (rows_extracted, rows_loaded, message, run_id),
         )
 
 
