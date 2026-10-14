@@ -282,3 +282,34 @@ reset the database; the pipeline reloads the jobs from the API:
 docker compose down -v      # deletes ALL data in the database
 docker compose up --build
 ```
+
+## Running against Supabase
+
+The same pipeline image can run against a managed Postgres database (Supabase) instead
+of the local one. The local setup is unchanged; this is a separate, opt-in Compose
+service (`pipeline-supabase`, profile `supabase`).
+
+1. Create `.env.supabase` in the project root (it is gitignored, never commit it):
+
+   ```
+   DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+   SOURCES=arbeitnow
+   ```
+
+   Use the **Session pooler** connection string from Supabase (*Connect* button), port
+   5432: the direct connection (`db.<project-ref>.supabase.co`) is IPv6-only, which
+   Docker Desktop and GitHub Actions runners can't reach, and the transaction pooler
+   (port 6543) doesn't support the prepared statements psycopg uses. Special characters
+   in the password must be URL-encoded (e.g. `@` -> `%40`).
+   `DATABASE_URL` takes precedence over the `POSTGRES_*` variables, and the connection
+   uses `sslmode=require`.
+
+2. Run migrations + pipeline once:
+
+   ```bash
+   docker compose --profile supabase run --rm --build pipeline-supabase
+   ```
+
+All tables have Row Level Security enabled with no policies (migration 004), so
+Supabase's public REST API can't read or write them; the pipeline connects as the table
+owner and is not affected. The tests never run against `DATABASE_URL`.

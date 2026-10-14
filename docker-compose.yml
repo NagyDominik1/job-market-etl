@@ -1,11 +1,14 @@
 # Docker Compose file for the job-market-etl project.
-# Two services:
-#   postgres  - the PostgreSQL database (runs all the time)
-#   pipeline  - the ETL job (runs once, loads the data, then exits)
+# Services:
+#   postgres           - the local PostgreSQL database (runs all the time)
+#   pipeline           - the ETL job against the local database (runs once, then exits)
+#   pipeline-supabase  - the same image against Supabase; only started on request
+#                        (profile "supabase"), never by "docker compose up"
 #
 # Start everything:        docker compose up --build
 # Start only the database: docker compose up -d postgres
 # Run the pipeline again:  docker compose run --rm pipeline
+# Run against Supabase:    docker compose --profile supabase run --rm --build pipeline-supabase
 # Stop everything:         docker compose down
 
 services:
@@ -78,6 +81,26 @@ services:
 
     # A batch job: it runs once and exits. "no" = never restart it automatically
     # (this is the default; written out here to make it explicit).
+    restart: "no"
+
+  # The same pipeline image, but connected to Supabase instead of the local
+  # database. Run it with:
+  #   docker compose --profile supabase run --rm --build pipeline-supabase
+  # "profiles": not part of the default setup, so "docker compose up" ignores it.
+  pipeline-supabase:
+    profiles: ["supabase"]
+    build: .
+    # Only .env.supabase (gitignored): it must set DATABASE_URL, and can set
+    # SOURCES, ANTHROPIC_API_KEY... The local .env is NOT loaded, so a missing
+    # DATABASE_URL fails loudly instead of silently using the local database.
+    # required: false = docker compose works without the file (e.g. for "up").
+    env_file:
+      - path: .env.supabase
+        required: false
+    # No depends_on: the database is Supabase, not the local container.
+    volumes:
+      - ./data/manual:/app/data/manual:ro
+      - ./config:/app/config:ro
     restart: "no"
 
 # Named volumes are declared here; Docker manages where they live on disk.
