@@ -1,0 +1,75 @@
+# Daily run of the job-market pipeline against Supabase.
+#
+# - Runs every day at 05:00 UTC, and on demand (Actions tab -> "Daily pipeline" -> Run workflow).
+# - Builds the image from our Dockerfile and runs it: the SAME image as locally.
+# - Secrets (Settings -> Secrets and variables -> Actions):
+#     DATABASE_URL       Supabase session-pooler URL (required)
+#     PROFILE_YAML       contents of config/profile.yaml (required)
+#     ANTHROPIC_API_KEY  optional; empty = rule-based enrichment only
+#   GitHub masks secret values in the log; we never echo them either.
+# - A failing step (e.g. one source failed -> exit code 1) makes the run red,
+#   and GitHub emails me.
+# - Scheduled workflows only run on the repository's default branch (main).
+
+name: Daily pipeline
+
+on:
+  schedule:
+    - cron: "0 5 * * *"   # 05:00 UTC every day
+  workflow_dispatch:       # "Run workflow" button
+
+# The job only needs to read the code.
+permissions:
+  contents: read
+
+# Never two runs at the same time (e.g. a manual run during the scheduled one):
+# the second waits until the first finishes.
+concurrency:
+  group: pipeline
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Check that the required secrets are set
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PROFILE_YAML: ${{ secrets.PROFILE_YAML }}
+        run: |
+          missing=0
+          [ -n "$DATABASE_URL" ] || { echo "::error::Secret DATABASE_URL is not set"; missing=1; }
+          [ -n "$PROFILE_YAML" ] || { echo "::error::Secret PROFILE_YAML is not set"; missing=1; }
+          exit $missing
+
+      - name: Build the pipeline image
+        run: docker build --tag job-market-etl-pipeline .
+
+      # The profile is personal, so it is not in the repository: write it from
+      # the secret into the (gitignored) config/profile.yaml, only on this
+      # temporary runner. printf, not echo: the content is never printed.
+      - name: Write config/profile.yaml from the PROFILE_YAML secret
+        env:
+          PROFILE_YAML: ${{ secrets.PROFILE_YAML }}
+        run: |
+          printf '%s\n' "$PROFILE_YAML" > config/profile.yaml
+          chmod 644 config/profile.yaml   # readable by the container's non-root user
+
+      # "-e NAME" without "=value" passes the variable from this step's
+      # environment, so the secret never appears on the command line.
+      # SOURCES=arbeitnow: the manual CSVs are gitignored and stay local.
+      - name: Run the pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          docker run --rm \
+            -e DATABASE_URL \
+            -e ANTHROPIC_API_KEY \
+            -e SOURCES=arbeitnow \
+            -v "$PWD/config/profile.yaml:/app/config/profile.yaml:ro" \
+            job-market-etl-pipeline
