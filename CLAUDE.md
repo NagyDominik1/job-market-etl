@@ -92,6 +92,25 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   bound), >15 ignored; languages: German/French with a requirement cue in the same
   sentence and no "plus/would be/ideal" cue, or a description written in that language.
 
+- Managed Postgres (Supabase) in production: no server to run, backups and TLS included;
+  the code only sees DATABASE_URL (src/db.py: it takes precedence over POSTGRES_*,
+  sslmode=require unless the URL sets one, never logged). Locally nothing changed;
+  `docker compose --profile supabase run --rm --build pipeline-supabase` runs the same
+  image against Supabase with the gitignored .env.supabase.
+- Session pooler (aws-1-eu-central-1.pooler.supabase.com:5432), not the direct
+  connection (IPv6-only; Docker Desktop and GitHub runners have no IPv6) and not the
+  transaction pooler (port 6543; no prepared statements, which psycopg uses
+  automatically). Passwords in the URL must be URL-encoded.
+- RLS on by default (migration 004): every table has Row Level Security enabled with no
+  policies, so Supabase's REST API (anon/authenticated) sees nothing; the pipeline is the
+  table owner and is unaffected. Phase 8 adds read-only SELECT policies.
+- Same image in CI: .github/workflows/pipeline.yml builds our Dockerfile and runs it
+  (daily 05:00 UTC + workflow_dispatch, concurrency group, 15 min timeout,
+  SOURCES=arbeitnow). Secrets DATABASE_URL, PROFILE_YAML (written to
+  config/profile.yaml on the runner and mounted read-only), optional ANTHROPIC_API_KEY;
+  passed with `-e NAME` so they never appear on a command line. Exit code 1 -> red run.
+- Tests never touch DATABASE_URL: DB fixtures skip when it is set.
+
 ## Known limitations
 - The same job posted with a Hungarian and a Serbian (or English) title is NOT matched
   ("Adatmérnök" vs "Data Engineer" vs "Inženjer podataka"): the fingerprint compares
@@ -130,8 +149,7 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   understand for an interview.
 
 ## Current status
-Phase 3 done (branch v2): migration 003, profile (config/profile.yaml), enrich step
-reconnected to jobs (rules for all jobs + optional Claude upgrades), Hungarian/Serbian
-rules, years/language extraction, deterministic match score with reasons, top-10 new
-jobs logged at the end of each run.
-README.md still describes v1 (rewritten in Phase 6).
+Phase 7 done (branch v2): DATABASE_URL support, migration 004 (RLS), first run against
+Supabase succeeded (4 migrations, 850 jobs), GitHub Actions workflow, README rewritten
+for v2. Phases 4, 5, 6 and 8 are still open (Phase 7 was done before 4-6 on purpose).
+Pending: merging v2 into main (needed for the scheduled workflow) after my approval.
