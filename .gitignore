@@ -20,3 +20,6 @@ data/manual/*
 
 # My real job-search profile stays local; config/profile.example.yaml is committed.
 config/profile.yaml
+
+# Connection settings for the Supabase database (DATABASE_URL etc.): a secret.
+.env.supabase
