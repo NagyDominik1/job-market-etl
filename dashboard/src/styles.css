@@ -1,0 +1,257 @@
+/* Plain CSS, mobile first. Colours are variables, so dark mode only swaps them. */
+
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1c1f24;
+  --muted: #5f6672;
+  --border: #dfe2e7;
+  --accent: #2557d6;
+  --plus: #1d7a3e;
+  --minus: #b3261e;
+  --high: #1d7a3e;
+  --mid: #a86500;
+  --low: #6b7280;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121418;
+    --surface: #1b1e24;
+    --text: #e6e8eb;
+    --muted: #9aa1ab;
+    --border: #2d323a;
+    --accent: #7ea2ff;
+    --plus: #5fcf87;
+    --minus: #ff8a80;
+    --high: #2f9e5a;
+    --mid: #c98a1b;
+    --low: #59606b;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: var(--accent);
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+input,
+select {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+input[type='range'] {
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.status {
+  padding: 0 1rem;
+  color: var(--muted);
+}
+
+.status.error {
+  color: var(--minus);
+}
+
+/* --- Login ----------------------------------------------------------------- */
+
+.login {
+  max-width: 22rem;
+  margin: 15vh auto 0;
+  padding: 0 1rem;
+}
+
+.login form {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.login .status {
+  padding: 0;
+}
+
+/* --- Feed ------------------------------------------------------------------ */
+
+.page {
+  max-width: 64rem;
+  margin: 0 auto;
+  padding-bottom: 2rem;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.who {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filters {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0 1rem 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.filters label {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.cards {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0 1rem;
+}
+
+.card {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.card-head {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.meta {
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.score {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 700;
+}
+
+.score.high { background: var(--high); }
+.score.mid { background: var(--mid); }
+.score.low,
+.score.none { background: var(--low); }
+
+.badge {
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.7rem;
+  vertical-align: middle;
+}
+
+.reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.6rem 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8rem;
+}
+
+.reasons li {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.reasons .plus { color: var(--plus); }
+.reasons .minus { color: var(--minus); }
+.reasons .neutral { color: var(--muted); }
+
+.card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* Wider screens: filters in one row, cards in two columns. */
+@media (min-width: 48rem) {
+  .filters {
+    grid-template-columns: 1.2fr 1fr 0.8fr 1.4fr;
+    align-items: end;
+  }
+
+  .cards {
+    grid-template-columns: 1fr 1fr;
+  }
+}

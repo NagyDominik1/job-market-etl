@@ -8,3 +8,4 @@ __pycache__
 .pytest_cache
 .claude/
 config/profile.yaml
+dashboard/
