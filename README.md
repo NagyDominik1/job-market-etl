@@ -2,11 +2,12 @@
 
 A personal **job-posting monitor**: an ETL pipeline that collects IT job postings from
 several legal sources, unifies them, removes duplicates across sources, scores each job
-against my profile, and shows what is new. It runs every morning on GitHub Actions
-against a Supabase Postgres database, and the same Docker image runs locally.
+against my profile, and shows what is new in a private dashboard. It runs every morning
+on GitHub Actions against a Supabase Postgres database, and the same Docker image runs
+locally.
 
 Built with Python 3.14, PostgreSQL 17, Docker Compose, psycopg 3, pytest, GitHub Actions,
-Supabase and (optionally) the Claude API.
+Supabase, React (Vite) and (optionally) the Claude API.
 
 > **Version 2, in progress.** v1 (one source -> pandas -> Postgres, a learning project)
 > is preserved as the git tag [`v1.0`](../../tree/v1.0). This README describes v2:
@@ -39,6 +40,9 @@ flowchart LR
     EN --> SC["Match score<br/>src/scoring.py"]
     SC --> ENR[("job_enrichment")]
     ENR --> REP["New jobs, top 10<br/>(log)"]
+    ENR --> FEED[("job_feed view<br/>read-only, RLS")]
+    JOBS --> FEED
+    FEED --> DASH["Dashboard<br/>React, login required"]
 ```
 
 | Step | What it does | Code |
@@ -47,7 +51,8 @@ flowchart LR
 | **Transform** | Maps each source's payload to one shape, cleans it, and computes a **fingerprint** (normalized company + title + city) to merge the same job from different sources into one row in `jobs`. Bad postings get a `transform_error` and are retried next run. | `src/mappers/`, `src/normalize.py`, `src/transform.py` |
 | **Enrich** | Extracts seniority, category, skills, required years and required languages: free keyword **rules** for every job (Hungarian and Serbian too, Latin and Cyrillic), optionally upgraded by **Claude** for the most promising jobs. | `src/rules.py`, `src/enrich.py` |
 | **Score** | A deterministic 0-100 **match score** against `config/profile.yaml`, with the reasons (`"+ PHP (3)"`, `"- requires 3+ years: score 0"`). Recomputed for every job on every run. | `src/scoring.py` |
-| **Report** | At the end of each run: how many jobs are new, and the top 10 new ones with their reasons (in the log for now). | `src/main.py` |
+| **Report** | At the end of each run: how many jobs are new, and the top 10 new ones with their reasons, in the log. | `src/main.py` |
+| **Dashboard** | A private React page (magic-link login, only my account) listing `job_feed` by score, with filters. Read-only. | `dashboard/`, `migrations/005_*.sql` |
 
 Every step writes a row to `etl_runs` (status, row counts, error message).
 
@@ -58,10 +63,11 @@ Every step writes a row to `etl_runs` (status, row counts, error message).
 | Arbeitnow API and manual CSV sources | Gmail IMAP job-alert extractor (phase 4) |
 | Raw data in Postgres, plain-SQL migrations | Company ATS extractors, `companies.yaml` (phase 5) |
 | Cross-source deduplication (fingerprint) | A proper "new postings" report (phase 6) |
-| Rule-based enrichment (EN/DE/HU/SR), optional Claude | React dashboard on Vercel (phase 8) |
-| Match score with reasons, profile in YAML | Read-only RLS policies for the dashboard |
+| Rule-based enrichment (EN/DE/HU/SR), optional Claude | Dashboard deployed on Vercel (works locally today) |
+| Match score with reasons, profile in YAML | |
 | Daily GitHub Actions run against Supabase | |
-| ~300 tests (unit + local-database tests) | |
+| Private read-only dashboard (React, magic-link login) | |
+| ~310 tests (unit + local-database tests) | |
 
 ## Quick start (local, Docker only)
 
@@ -176,6 +182,44 @@ A failing source exits with code 1, so the run turns red and GitHub sends an ema
 Runs never overlap (concurrency group) and time out after 15 minutes. Scheduled
 workflows only run on the default branch.
 
+## Dashboard
+
+A small Vite + React app in [`dashboard/`](dashboard/) (plain CSS, no UI framework). It
+reads the `job_feed` view through Supabase's REST API with
+[supabase-js](https://supabase.com/docs/reference/javascript): jobs sorted by match score,
+filters for minimum score, city, "new in the last 24 hours / 7 days" and a text search
+on title and company. Every filter runs in the database.
+
+**Who can see what** (migration 005, tested in `tests/test_dashboard_access.py`):
+
+| Caller | Database role | Access |
+|--------|---------------|--------|
+| Not logged in | `anon` | nothing: no privileges, no policies |
+| Logged in (only my account; sign-ups are disabled) | `authenticated` | `SELECT` on `job_feed` only (and what the view needs); no writes, no raw payloads, no run log |
+| The pipeline | table owner | everything (RLS doesn't apply to the owner) |
+
+`job_feed` is created `WITH (security_invoker = true)`: the view checks the RLS policies
+as the *caller*. A normal view runs as its owner and would bypass RLS for everyone
+allowed to read it.
+
+Run it locally (Node.js 22.12+):
+
+```bash
+cd dashboard
+cp .env.example .env.local      # VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
+npm install
+npm run dev                     # http://localhost:5173
+```
+
+The anon (publishable) key is public by design: it is shipped to every browser. The data
+is protected by the database (RLS and privileges), not by hiding the key. The
+`service_role` key is never used by the dashboard.
+
+Supabase settings: my user created by hand, **sign-ups disabled**, and the dashboard's
+URLs (`http://localhost:5173/**`, the Vercel URL) in *Authentication -> URL
+Configuration*. Deployment: Vercel project with **Root Directory = `dashboard`** and the
+two `VITE_` environment variables.
+
 ## Design decisions
 
 - **Raw data in the database.** Every posting is stored unchanged (JSONB) before any
@@ -201,6 +245,10 @@ workflows only run on the default branch.
   secrets differ. The personal profile is gitignored and comes from a secret in CI.
 - **Secure defaults.** Postgres bound to `127.0.0.1` locally, TLS to Supabase, Row Level
   Security on every table, a non-root container user, secrets never logged.
+- **Least privilege for the dashboard.** Two independent locks: table privileges
+  (`REVOKE ALL`, then `GRANT SELECT` only on what the view needs, not the raw payload) and
+  RLS policies (`SELECT` for `authenticated` only). The view uses `security_invoker`, so
+  it can't bypass them. Login is a magic link to the only existing account.
 
 ## Known limitations
 
@@ -220,7 +268,8 @@ workflows only run on the default branch.
 ├── docker-compose.yml               # postgres + pipeline (+ pipeline-supabase, opt-in)
 ├── Dockerfile                       # the pipeline image (python:3.14.8-slim, non-root)
 ├── config/profile.example.yaml      # profile structure (my real profile.yaml is gitignored)
-├── migrations/                      # 001-004 plain SQL migrations
+├── migrations/                      # 001-005 plain SQL migrations
+├── dashboard/                       # Vite + React dashboard (deployed separately)
 ├── data/manual/README.md            # CSV format (the CSV files themselves are gitignored)
 ├── sql/analysis.sql                 # example analysis queries
 ├── src/

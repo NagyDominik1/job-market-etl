@@ -110,6 +110,23 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   config/profile.yaml on the runner and mounted read-only), optional ANTHROPIC_API_KEY;
   passed with `-e NAME` so they never appear on a command line. Exit code 1 -> red run.
 - Tests never touch DATABASE_URL: DB fixtures skip when it is set.
+- CI runner pinned to ubuntu-24.04 (not ubuntu-latest, which moves without warning).
+- Dashboard (dashboard/, Vite + React, plain JS and CSS, supabase-js): reads only the
+  job_feed view; all filters run in the database (PostgREST), max 200 rows shown.
+  Login = magic link (signInWithOtp, shouldCreateUser: false) to the only existing user;
+  sign-ups are disabled in Supabase. Config: VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY
+  in dashboard/.env.local (gitignored) and in Vercel (Root Directory = dashboard). The
+  anon/publishable key is public by design; the service_role key is never used there.
+- Read access (migration 005): job_feed view WITH (security_invoker = true), so RLS is
+  checked as the caller (a normal view runs as its owner and bypasses RLS). Two locks:
+  REVOKE ALL from anon/authenticated (Supabase grants ALL by default), then GRANT SELECT
+  to authenticated on job_feed, jobs, job_enrichment, sources and only (id, source_id,
+  job_id) of raw_postings; plus SELECT-only policies TO authenticated. anon: nothing.
+  The migration creates anon/authenticated locally when missing.
+- Future migrations that add tables: enable RLS and REVOKE from anon/authenticated
+  explicitly (Supabase's default privileges grant ALL on new tables).
+- Node/npm for the dashboard: versions pinned in package.json, package-lock.json
+  committed; Node is not required for the pipeline.
 
 ## Known limitations
 - The same job posted with a Hungarian and a Serbian (or English) title is NOT matched
@@ -125,6 +142,10 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 - Only an exact "Remote" location (or the source's remote flag) counts as remote:
   "UK - Remote" or "Remote (Germany)" get no city points.
 - Rule-based language detection is keyword-based and can still misread a sentence.
+- The dashboard policies use USING (true): access control relies on only one user
+  existing and sign-ups being disabled (no per-user rows; could be restricted to my
+  email via auth.jwt() later, Supabase-only).
+- Supabase's built-in email sender allows only a few magic-link emails per hour.
 
 ## Phases (work on ONE phase at a time, never start the next one unasked)
 0 Scan + this file
@@ -149,7 +170,9 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   understand for an interview.
 
 ## Current status
-Phase 7 done (branch v2): DATABASE_URL support, migration 004 (RLS), first run against
-Supabase succeeded (4 migrations, 850 jobs), GitHub Actions workflow, README rewritten
-for v2. Phases 4, 5, 6 and 8 are still open (Phase 7 was done before 4-6 on purpose).
-Pending: merging v2 into main (needed for the scheduled workflow) after my approval.
+Phase 7 done and merged into main (daily workflow active).
+Phase 8a done (branch phase-8-dashboard): migration 005 (job_feed + read-only access)
+applied to Supabase, dashboard works locally (login + list verified).
+Next: merge into main after my approval, then deploy on Vercel (Root Directory =
+dashboard) and add the Vercel URL to Supabase Site URL / Redirect URLs.
+Open phases: 4 (Gmail IMAP), 5 (ATS), 6 (report).
