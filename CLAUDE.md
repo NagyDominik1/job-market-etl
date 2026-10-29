@@ -158,6 +158,31 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 6 New-postings report, tests, English README
 7 Supabase + GitHub Actions scheduled run
 8 Vercel React dashboard
+9 Job search assistant on the website (plan below)
+
+## Phase 9: Job search assistant on the website
+Goal: everything happens on the dashboard: AI search for job postings and for IT companies
+(open applications), application tracking with follow-up reminders, short letter drafting.
+The existing pipeline (extract/transform/enrich, daily GitHub Actions) must NOT change.
+
+Steps (one at a time, each on its own branch, ask me before merging to main):
+9.1 Tracker tables (database only).
+9.2 I create an Anthropic API key with a monthly spend limit and store it myself as the
+    Supabase Edge Function secret ANTHROPIC_API_KEY. Never in the frontend, never in a
+    VITE_ variable, never in git.
+9.3 Edge Function "search": two modes (jobs | companies). Parameters: countries, cities,
+    remote, roles, seniority, languages. Calls Claude (claude-haiku-5-5) with the web search
+    tool, max_uses 15, structured JSON output (title/company, city, url, deadline,
+    contact for companies, reasons, score). Excludes companies I already applied to
+    (company_key). Checks the logged-in user, max 1 search per hour. Stores results in
+    search_results and a cost log in search_runs (searches used, tokens).
+9.4 Dashboard tab "Jelentkezéseim": add from search results or job_feed, status buttons
+    (sent / reply / forwarded / stated date / follow-up / rejection), "Ma teendő" list,
+    expiring list. Needs INSERT/UPDATE policies for authenticated on tracker tables only.
+9.5 Edge Function "draft-letter": letter_templates table (hu/sr/en, posting/open),
+    4-5 sentences max, suggests the CV (hu or en), uses match reasons for one tailored line.
+
+Rules: migrations are additive only; all existing tests must pass; secrets never printed.
 
 ## How to work with me
 - I'm a beginner in Python, Docker and Postgres (background: PHP/MySQL, C#, React).
