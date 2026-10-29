@@ -226,7 +226,10 @@ to Supabase.
 Phase 9.3 merged into main (2026-10-29): migration 007 (search_profile, search_runs,
 search_results) applied to Supabase; Edge Function "search" deployed (verify_jwt = true);
 Keresés tab on the dashboard. The search_profile row is filled from the gitignored
-sql/search_profile_local.sql. Not yet tested end to end (one real search on Vercel).
+sql/search_profile_local.sql. First real search (run 1) failed with a bare "Claude API
+error 400"; the function (version 2) now stores the API's error type + message + request
+id in search_runs.error. Migration 008: failed runs (status error) never count toward the
+1-per-hour limit (applied to Supabase by the next pipeline run).
 Localhost magic-link login still redirects to Vercel (emailRedirectTo now ends in "/";
 check the Supabase email template and Redirect URLs).
 Next: 9.4 (Jelentkezéseim tab).

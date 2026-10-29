@@ -69,9 +69,17 @@ def test_a_failed_run_that_cost_nothing_does_not_count(conn):
     assert start_run(conn)[0] is not None
 
 
-def test_a_failed_run_that_cost_tokens_still_counts(conn):
+def test_a_failed_run_that_cost_tokens_does_not_count_either(conn):
+    # Since 008: every failed run can be retried at once (the spend limit on
+    # the Anthropic key is the cost cap).
     first, _ = start_run(conn)
     conn.execute("UPDATE search_runs SET status = 'error', input_tokens = 5000 WHERE id = %s", (first,))
+    assert start_run(conn)[0] is not None
+
+
+def test_a_successful_run_still_counts(conn):
+    first, _ = start_run(conn)
+    conn.execute("UPDATE search_runs SET status = 'success', input_tokens = 5000 WHERE id = %s", (first,))
     assert start_run(conn)[0] is None
 
 

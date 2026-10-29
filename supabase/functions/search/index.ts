@@ -149,13 +149,29 @@ async function askClaude(
   throw new Error('Too many API requests without results')
 }
 
-/** A short, safe error text for the database and the browser (no secrets). */
+// Anything that looks like an Anthropic key is cut out of error texts, just in
+// case an error message ever echoes one. The key itself is never passed here.
+const KEY_PATTERN = /sk-ant-[A-Za-z0-9_-]+/g
+
+/**
+ * A short, safe error text for the database and the browser. For API errors:
+ * status + the error type and message from the response BODY (e.g.
+ * "invalid_request_error: tools.0.user_location: ...") + the request id, so
+ * the cause is visible in search_runs.error. Never the headers or the request:
+ * the body's message is all we need, and it doesn't contain the key.
+ */
 function describeError(error: unknown): string {
-  if (error instanceof Anthropic.RateLimitError) return 'Claude API: rate limited (429), try again later'
-  if (error instanceof Anthropic.AuthenticationError) return 'Claude API: the API key is invalid or missing'
   if (error instanceof Anthropic.APIConnectionTimeoutError) return 'Claude API: timed out'
-  if (error instanceof Anthropic.APIError) return `Claude API error ${error.status ?? ''}`.trim()
-  if (error instanceof Error) return error.message.slice(0, 300)
+  if (error instanceof Anthropic.AuthenticationError) return 'Claude API: the API key is invalid or missing (401)'
+  if (error instanceof Anthropic.APIError) {
+    // Body shape: {type: "error", error: {type, message}, request_id}
+    const body = (error.error ?? {}) as { error?: { type?: unknown; message?: unknown } }
+    const type = typeof body.error?.type === 'string' ? body.error.type : 'api_error'
+    const message = typeof body.error?.message === 'string' ? body.error.message : error.message
+    const requestId = error.requestID ? ` [request ${error.requestID}]` : ''
+    return `Claude API ${error.status ?? ''} ${type}: ${message}${requestId}`.replace(KEY_PATTERN, '[redacted]').slice(0, 600)
+  }
+  if (error instanceof Error) return error.message.replace(KEY_PATTERN, '[redacted]').slice(0, 300)
   return 'Unknown error'
 }
 
