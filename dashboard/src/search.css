@@ -1,0 +1,57 @@
+/* Styles for the "Keresés" tab and the tab bar. Uses the colour variables
+   of styles.css, so light and dark mode work the same way. */
+
+.tabs {
+  display: flex;
+  gap: 0.5rem;
+  max-width: 64rem;   /* same width as .page */
+  margin: 0 auto;
+  padding: 0.75rem 1rem 0;
+}
+
+.search-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  padding: 0 1rem;
+}
+
+.search-form .filters {
+  margin: 0;   /* the form already has the side padding */
+}
+
+.search-form > button[type='submit'] {
+  align-self: flex-start;
+}
+
+.mode-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+}
+
+.checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.checks input {
+  width: auto;   /* styles.css makes every input full width */
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.badge.applied {
+  background: var(--mid);
+}

@@ -103,8 +103,7 @@ def test_real_migrations_create_the_v2_schema(db_conn):
 
 # --- 004: Row Level Security -----------------------------------------------------------
 
-V2_TABLES = ["sources", "raw_postings", "jobs", "job_enrichment", "etl_runs", "schema_migrations",
-             "applications", "application_events"]   # 006: tracker tables
+V2_TABLES = ["sources", "raw_postings", "jobs", "job_enrichment", "etl_runs", "schema_migrations"]
 
 
 def test_row_level_security_is_enabled_on_every_table(db_conn):
@@ -116,7 +115,10 @@ def test_row_level_security_is_enabled_on_every_table(db_conn):
         WHERE c.relnamespace = current_schema()::regnamespace AND c.relkind = 'r'
         """
     ).fetchall()
-    assert dict(rows) == {table: True for table in V2_TABLES}
+    tables = dict(rows)
+    assert set(V2_TABLES) <= set(tables)   # the v2 tables exist...
+    # ...and EVERY table has RLS, including the ones later migrations add.
+    assert all(tables.values()), [table for table, rls in tables.items() if not rls]
 
 
 def test_rls_without_policies_hides_rows_from_other_roles_but_not_the_owner(db_conn):

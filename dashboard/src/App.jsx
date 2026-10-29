@@ -2,10 +2,12 @@ import { useEffect, useState } from 'react'
 import { configError, supabase } from './supabase.js'
 import Login from './Login.jsx'
 import JobFeed from './JobFeed.jsx'
+import SearchTab from './SearchTab.jsx'
 
 export default function App() {
   // undefined = still checking, null = logged out, object = logged in
   const [session, setSession] = useState(undefined)
+  const [tab, setTab] = useState('feed') // 'feed' | 'search'
 
   useEffect(() => {
     if (configError) return
@@ -18,5 +20,18 @@ export default function App() {
 
   if (configError) return <p className="status error">{configError}</p>
   if (session === undefined) return <p className="status">Loading…</p>
-  return session ? <JobFeed session={session} /> : <Login />
+  if (!session) return <Login />
+  return (
+    <>
+      <nav className="tabs" aria-label="Tabs">
+        <button className={tab === 'feed' ? '' : 'secondary'} onClick={() => setTab('feed')}>
+          Job feed
+        </button>
+        <button className={tab === 'search' ? '' : 'secondary'} onClick={() => setTab('search')}>
+          Keresés
+        </button>
+      </nav>
+      {tab === 'feed' ? <JobFeed session={session} /> : <SearchTab session={session} />}
+    </>
+  )
 }
