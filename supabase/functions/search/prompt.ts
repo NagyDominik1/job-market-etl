@@ -1,7 +1,7 @@
 // Prompt and tool definitions for the "search" Edge Function.
 // Pure (no imports from Deno or npm), so it can be unit-tested with Node.
 
-import type { Mode, SearchParams } from './validate.ts'
+import { FETCH_BLOCKED_DOMAINS, type Mode, type SearchParams } from './validate.ts'
 
 export const MODEL = 'claude-haiku-5-5'
 export const MAX_SEARCHES = 15 // web searches per run ($10 per 1000)
@@ -142,10 +142,13 @@ How to work:
 1. Search widely, up to ${MAX_SEARCHES} searches: one search per city and role (e.g. "junior PHP
    developer Szeged", "PHP programer Subotica"), in the local language too (Hungarian:
    "fejlesztő", "programozó", "állás"; Serbian: "programer", "posao"). Use the local job sites
-   (Hungary: profession.hu; Serbia: helloworld.rs, poslovi.infostud.com, joberty.com), LinkedIn,
-   and company career pages (site: queries help).
+   (Hungary: profession.hu; Serbia: helloworld.rs, poslovi.infostud.com, joberty.com) and
+   company career pages (site: queries help).
 2. Open every candidate posting with web_fetch (up to ${MAX_FETCHES} pages) and read title, company,
    city, seniority, years of experience and deadline FROM THE POSTING ITSELF.
+   Never fetch ${FETCH_BLOCKED_DOMAINS.join(', ')} (blocked; its terms forbid automated access). A posting
+   seen there in search results counts only if you find and open the same posting on the
+   employer's site or another job site; report that url. Otherwise skip it.
 3. Report only postings you opened and confirmed (confirmed: true). The url must be that
    single posting page: never a search-results page, a category/list page or a careers index.
    If you can only find a list page, open it and fetch the individual postings it links to.
@@ -212,6 +215,8 @@ export function webSearchTool(maxUses: number) {
  * The web fetch tool: Claude opens a candidate posting to confirm its details.
  * It can only fetch URLs that came from search or fetch results (an API rule),
  * and Anthropic's fetcher respects robots.txt: single pages on demand, no crawling.
+ * blocked_domains: sites whose terms forbid automated access (LinkedIn); the API
+ * enforces it, subdomains included. LinkedIn may still appear in search results.
  */
 export function webFetchTool(maxUses: number) {
   return {
@@ -219,6 +224,7 @@ export function webFetchTool(maxUses: number) {
     name: 'web_fetch' as const,
     max_uses: maxUses,
     max_content_tokens: FETCH_MAX_TOKENS,
+    blocked_domains: [...FETCH_BLOCKED_DOMAINS],
     // Same as for search: don't echo the raw page text back to us.
     response_inclusion: 'excluded' as const,
   }

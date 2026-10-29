@@ -189,6 +189,21 @@ export function isListingUrl(value: string): boolean {
   return false
 }
 
+// Sites whose terms forbid automated access: web_fetch never opens them
+// (blocked_domains in prompt.ts), so a job result linking there can't have been
+// confirmed from the posting. Subdomains count too (www., hu.linkedin.com).
+export const FETCH_BLOCKED_DOMAINS = ['linkedin.com']
+
+/** True when the URL is on a domain web_fetch is not allowed to open. */
+export function isFetchBlocked(value: string): boolean {
+  try {
+    const host = new URL(value).hostname.toLowerCase()
+    return FETCH_BLOCKED_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`))
+  } catch {
+    return false
+  }
+}
+
 // --- profile rules for job results -------------------------------------------------------
 
 /** The dealbreakers the code enforces itself (the prompt asks for them too). */
@@ -255,7 +270,7 @@ export interface DroppedBy {
   invalid: number // no company/title, bad score, not an object
   duplicate: number
   over_limit: number
-  unconfirmed: number // jobs: Claude did not open the posting page
+  unconfirmed: number // jobs: Claude did not (or could not: blocked domain) open the posting page
   listing_url: number // jobs: no URL, or a search/category/careers-index URL
   dealbreaker: number // jobs: seniority, years or title keyword from the profile
 }
@@ -307,7 +322,7 @@ export function validateResults(
 
     const url = httpUrl(item.url)
     if (mode === 'jobs') {
-      if (item.confirmed !== true) {
+      if (item.confirmed !== true || (url !== null && isFetchBlocked(url))) {
         droppedBy.unconfirmed++
         continue
       }

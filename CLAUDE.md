@@ -158,6 +158,10 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   that aren't confirmed, link to a list/search page (isListingUrl, a heuristic), or hit a
   profile dealbreaker (seniority, min_years_required, title keywords) - the prompt asks
   for the same, the code enforces it.
+- linkedin.com is never fetched (its terms forbid automated access): it is in web_fetch's
+  blocked_domains (FETCH_BLOCKED_DOMAINS in validate.ts), so LinkedIn is used only through
+  search results. A LinkedIn posting counts only if Claude finds and opens the same posting
+  elsewhere; a job result that still links to linkedin.com is dropped as unconfirmed.
 
 ## Known limitations
 - The same job posted with a Hungarian and a Serbian (or English) title is NOT matched

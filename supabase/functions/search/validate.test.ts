@@ -5,8 +5,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker, httpUrl, isListingUrl, isoDate, rulesFromProfile, validateRequest,
-  validateResults,
+  FETCH_BLOCKED_DOMAINS, MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker, httpUrl, isFetchBlocked, isListingUrl, isoDate,
+  rulesFromProfile, validateRequest, validateResults,
 } from './validate.ts'
 import { MAX_FETCHES, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool } from './prompt.ts'
 
@@ -224,7 +224,7 @@ test('jobs: unconfirmed results and results without a posting URL are dropped', 
   const { results, droppedBy } = validateResults({
     results: [
       { ...GOOD_JOB, title: 'Not opened', confirmed: false },
-      { ...GOOD_JOB, title: 'List page', url: 'https://www.linkedin.com/jobs/search/?keywords=php' },
+      { ...GOOD_JOB, title: 'List page', url: 'https://www.indeed.com/jobs?q=php&l=Szeged' },
       { ...GOOD_JOB, title: 'No link', url: '' },
       { ...GOOD_JOB, title: 'Bad link', url: 'javascript:alert(1)' },
       GOOD_JOB,
@@ -287,4 +287,33 @@ test('validateResults applies the dealbreakers to jobs only', () => {
   assert.deepEqual(jobs.results.map((r) => r.title), ['Junior PHP Developer'])
   assert.equal(jobs.droppedBy.dealbreaker, 1)
   assert.equal(validateResults({ results: [senior] }, 'companies', RULES).results.length, 1)
+})
+
+// --- blocked domains (LinkedIn) ------------------------------------------------------------------
+
+test('web_fetch never opens linkedin.com', () => {
+  assert.deepEqual(webFetchTool(MAX_FETCHES).blocked_domains, FETCH_BLOCKED_DOMAINS)
+  assert.ok(FETCH_BLOCKED_DOMAINS.includes('linkedin.com'))
+})
+
+test('linkedin.com and its subdomains are blocked, look-alike domains are not', () => {
+  for (const url of ['https://linkedin.com/jobs/view/1', 'https://www.linkedin.com/jobs/view/1', 'https://hu.linkedin.com/jobs/view/1']) {
+    assert.equal(isFetchBlocked(url), true, url)
+  }
+  for (const url of ['https://notlinkedin.com/jobs/1', 'https://linkedin.com.example/jobs/1', 'https://acme.example/jobs/1']) {
+    assert.equal(isFetchBlocked(url), false, url)
+  }
+})
+
+test('a job result linking to LinkedIn is dropped even if marked confirmed', () => {
+  const { results, droppedBy } = validateResults({
+    results: [{ ...GOOD_JOB, title: 'From LinkedIn', url: 'https://www.linkedin.com/jobs/view/4012345678' }, GOOD_JOB],
+  }, 'jobs')
+  assert.deepEqual(results.map((r) => r.title), ['Junior PHP Developer'])
+  assert.equal(droppedBy.unconfirmed, 1)
+})
+
+test('the jobs prompt says LinkedIn is search-only', () => {
+  const prompt = buildUserPrompt('jobs', PARAMS, null, [], '2026-10-29')
+  assert.match(prompt, /Never fetch linkedin\.com/)
 })
