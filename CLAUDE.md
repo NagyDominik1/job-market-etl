@@ -151,6 +151,13 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   Supabase before main has the file.
 - Node/npm for the dashboard: versions pinned in package.json, package-lock.json
   committed; Node is not required for the pipeline.
+- AI search confirms job results with Anthropic's web_fetch (single posting pages Claude
+  found by search, max 20 per run, max 1 run per hour, robots.txt respected by the
+  fetcher). Our code fetches nothing; this is on-demand reading of individual postings,
+  not a crawler, so it stays within the "no scraping" rule. The code drops job results
+  that aren't confirmed, link to a list/search page (isListingUrl, a heuristic), or hit a
+  profile dealbreaker (seniority, min_years_required, title keywords) - the prompt asks
+  for the same, the code enforces it.
 
 ## Known limitations
 - The same job posted with a Hungarian and a Serbian (or English) title is NOT matched

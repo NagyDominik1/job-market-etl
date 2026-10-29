@@ -4,8 +4,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { MAX_RESULTS, cleanText, contact, httpUrl, isoDate, validateRequest, validateResults } from './validate.ts'
-import { SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webSearchTool } from './prompt.ts'
+import {
+  MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker, httpUrl, isListingUrl, isoDate, rulesFromProfile, validateRequest,
+  validateResults,
+} from './validate.ts'
+import { MAX_FETCHES, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool } from './prompt.ts'
 
 const PARAMS = { countries: ['HU'], cities: ['Szeged'], remote: false, roles: [], seniority: [], languages: [] }
 
@@ -84,6 +87,7 @@ test('control characters and extra whitespace are removed', () => {
 const GOOD_JOB = {
   title: 'Junior PHP Developer', company_name: 'Acme Kft.', city: 'Szeged', remote: false,
   url: 'https://acme.example/jobs/1', deadline: '2026-12-01', contact: '', reasons: ['+ PHP'], score: 80,
+  seniority: 'junior', years_required: 0, confirmed: true,
 }
 
 test('valid results are kept, sorted by score', () => {
@@ -106,15 +110,13 @@ test('invalid results are dropped, bad fields emptied', () => {
       { ...GOOD_JOB, title: 'C', score: '90' },       // not a number -> dropped
       GOOD_JOB,
       GOOD_JOB,                                       // duplicate -> dropped
-      { ...GOOD_JOB, title: 'D', url: 'javascript:alert(1)', deadline: 'next week' },  // kept, fields emptied
+      { ...GOOD_JOB, title: 'D', deadline: 'next week' },  // kept, bad deadline emptied
       'not an object',
     ],
   }, 'jobs')
   assert.equal(dropped, 6)
   assert.equal(results.length, 2)
-  const d = results.find((r) => r.title === 'D')!
-  assert.equal(d.url, null)
-  assert.equal(d.deadline, null)
+  assert.equal(results.find((r) => r.title === 'D')!.deadline, null)
 })
 
 test('companies mode: no title or deadline, contact checked', () => {
@@ -130,8 +132,10 @@ test('companies mode: no title or deadline, contact checked', () => {
 test('at most MAX_RESULTS results; garbage input gives none', () => {
   const many = Array.from({ length: 100 }, (_, i) => ({ ...GOOD_JOB, title: `Job ${i}` }))
   assert.equal(validateResults({ results: many }, 'jobs').results.length, MAX_RESULTS)
-  assert.deepEqual(validateResults(null, 'jobs'), { results: [], dropped: 0 })
-  assert.deepEqual(validateResults({ results: 'x' }, 'jobs'), { results: [], dropped: 0 })
+  for (const garbage of [null, { results: 'x' }]) {
+    const { results, dropped } = validateResults(garbage, 'jobs')
+    assert.deepEqual([results, dropped], [[], 0])
+  }
 })
 
 // --- prompt and tools ----------------------------------------------------------------------------
@@ -146,6 +150,8 @@ test('the prompt contains the parameters, the profile and the applied companies'
   assert.match(prompt, /Szeged, Szabadka/)
   assert.match(prompt, /PHP \(3\/3\)/)
   assert.match(prompt, /do not report these companies\): Nordeus/)
+  assert.match(prompt, /requires 5 or more years/)
+  assert.match(prompt, /level is not one of: junior/)
 })
 
 test('the system prompt treats web content as data', () => {
@@ -169,4 +175,116 @@ test('web search tool: current version, max_uses, results excluded', () => {
 
 test('web search tool has no user_location (the API rejected "HU" with a 400)', () => {
   assert.equal('user_location' in webSearchTool(15), false)
+})
+
+test('web fetch tool: current version, max_uses, page size capped, results excluded', () => {
+  const tool = webFetchTool(MAX_FETCHES)
+  assert.equal(tool.type, 'web_fetch_20260318')
+  assert.equal(tool.max_uses, MAX_FETCHES)
+  assert.ok(tool.max_content_tokens > 0 && tool.max_content_tokens <= 10_000)
+  assert.equal(tool.response_inclusion, 'excluded')
+})
+
+// --- posting URLs ----------------------------------------------------------------------------
+
+test('listing and search pages are not postings', () => {
+  for (const url of [
+    'https://www.profession.hu/allasok/it-programozas-fejlesztes/1,10',  // category list
+    'https://www.linkedin.com/jobs/search/?keywords=php&location=Szeged',
+    'https://www.indeed.com/jobs?q=php&l=Szeged',                       // ?q=
+    'https://www.helloworld.rs/oglasi-za-posao/programiranje',
+    'https://acme.example/careers',                                     // careers index
+    'https://acme.example/karrier/',
+    'https://acme.example/jobs?page=2',
+    'https://acme.example/category/it',
+    'https://acme.example/',                                            // homepage
+    'https://boards.greenhouse.io/acme',                                // ATS company list
+    'https://jobs.lever.co/acme',
+    'not a url',
+  ]) {
+    assert.equal(isListingUrl(url), true, url)
+  }
+})
+
+test('single posting pages are accepted', () => {
+  for (const url of [
+    'https://boards.greenhouse.io/acme/jobs/4012345',
+    'https://jobs.lever.co/acme/1b2c3d4e-0000-4000-8000-000000000000',
+    'https://apply.workable.com/acme/j/ABC123DEF/',
+    'https://www.linkedin.com/jobs/view/4012345678',
+    'https://www.profession.hu/allas/junior-php-fejleszto-szeged-1234567',
+    'https://acme.example/karrier/junior-php-fejleszto',
+    'https://acme.example/jobs/1',
+  ]) {
+    assert.equal(isListingUrl(url), false, url)
+  }
+})
+
+test('jobs: unconfirmed results and results without a posting URL are dropped', () => {
+  const { results, droppedBy } = validateResults({
+    results: [
+      { ...GOOD_JOB, title: 'Not opened', confirmed: false },
+      { ...GOOD_JOB, title: 'List page', url: 'https://www.linkedin.com/jobs/search/?keywords=php' },
+      { ...GOOD_JOB, title: 'No link', url: '' },
+      { ...GOOD_JOB, title: 'Bad link', url: 'javascript:alert(1)' },
+      GOOD_JOB,
+    ],
+  }, 'jobs')
+  assert.deepEqual(results.map((r) => r.title), ['Junior PHP Developer'])
+  assert.equal(droppedBy.unconfirmed, 1)
+  assert.equal(droppedBy.listing_url, 3)
+})
+
+test('companies: a careers index is the expected url, no confirmation needed', () => {
+  const { results } = validateResults({
+    results: [{ ...GOOD_JOB, url: 'https://acme.example/karrier', confirmed: false, seniority: 'unknown' }],
+  }, 'companies')
+  assert.equal(results.length, 1)
+  assert.equal(results[0].url, 'https://acme.example/karrier')
+})
+
+// --- profile dealbreakers ----------------------------------------------------------------------
+
+const RULES = rulesFromProfile({
+  seniority: ['junior', 'mid'],
+  dealbreakers: { min_years_required: 3, title_keywords: ['Principal', 'director'] },
+})
+
+test('rules come from the profile; a missing profile means no rules', () => {
+  assert.deepEqual(RULES, { allowedSeniority: ['junior', 'mid'], minYearsRequired: 3, titleKeywords: ['principal', 'director'] })
+  assert.deepEqual(rulesFromProfile(null), NO_RULES)
+  assert.deepEqual(rulesFromProfile({ seniority: 'junior', dealbreakers: 'x' }), NO_RULES)  // wrong types: ignored
+})
+
+test('senior/lead postings and 3+ years are dealbreakers, junior/mid with 0-2 years are fine', () => {
+  const job = (title: string, seniority = 'unknown', years = 0) => ({ title, seniority, years_required: years })
+  for (const bad of [
+    job('PHP Developer', 'senior'),
+    job('Senior PHP Developer'),            // the title says it, seniority field unknown
+    job('Szenior PHP fejlesztő'),
+    job('Sr. Backend Developer'),
+    job('Tech Lead (PHP)'),
+    job('Vezető fejlesztő'),
+    job('PHP Developer', 'mid', 3),         // exactly the limit counts
+    job('PHP Developer', 'junior', 5),
+    job('Director of Engineering'),         // title keyword
+  ]) {
+    assert.notEqual(dealbreaker(bad, RULES), null, bad.title)
+  }
+  for (const ok of [
+    job('Junior PHP Developer', 'junior', 0),
+    job('Medior PHP fejlesztő', 'mid', 2),
+    job('PHP programer'),                   // nothing stated: kept
+    job('Seniority-free Backend role'),     // "Senior" only as part of a longer word
+  ]) {
+    assert.equal(dealbreaker(ok, RULES), null, ok.title)
+  }
+})
+
+test('validateResults applies the dealbreakers to jobs only', () => {
+  const senior = { ...GOOD_JOB, title: 'Senior PHP Developer', seniority: 'senior', years_required: 5 }
+  const jobs = validateResults({ results: [senior, GOOD_JOB] }, 'jobs', RULES)
+  assert.deepEqual(jobs.results.map((r) => r.title), ['Junior PHP Developer'])
+  assert.equal(jobs.droppedBy.dealbreaker, 1)
+  assert.equal(validateResults({ results: [senior] }, 'companies', RULES).results.length, 1)
 })

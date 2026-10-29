@@ -11,16 +11,22 @@
 //   1. checks the caller is a logged-in user (anon / no token -> 401)
 //   2. validates the request body (validate.ts)
 //   3. rate limit: start_search_run() in the database (max 1 per hour -> 429)
-//   4. asks Claude (claude-haiku-5-5) with the web search tool; the answer
-//      comes back as ONE call of the submit_results tool (strict JSON)
-//   5. validates every result field, stores the results and the cost
-// The function never acts on web content: no fetches, no other tools, no
-// writes besides its own two tables. Web pages can only end up as validated JSON.
+//   4. asks Claude (claude-haiku-5-5) with web search + web fetch (Claude opens
+//      candidate postings to confirm them); the answer comes back as ONE call
+//      of the submit_results tool (strict JSON)
+//   5. validates every result field and the profile's dealbreakers, stores the
+//      results and the cost
+// The function itself never acts on web content: the searches and page fetches
+// run on Anthropic's side, our code fetches nothing and writes only its own two
+// tables. Web pages can only end up here as validated JSON.
 
 import Anthropic from 'npm:@anthropic-ai/sdk@1.3.0'
 import { createClient } from 'npm:@supabase/supabase-js@2.118.0'
-import { MAX_SEARCHES, MODEL, type Profile, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webSearchTool } from './prompt.ts'
-import { type Mode, type SearchParams, validateRequest, validateResults } from './validate.ts'
+import {
+  MAX_FETCHES, MAX_SEARCHES, MODEL, type Profile, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool,
+  webSearchTool,
+} from './prompt.ts'
+import { type Mode, type SearchParams, rulesFromProfile, validateRequest, validateResults } from './validate.ts'
 
 // Supabase stops a function after 150 s (free plan). Stop on our own before
 // that, so the run can still be marked as failed and its cost recorded.
@@ -64,12 +70,14 @@ function budapestToday(): string {
 
 interface Usage {
   searches: number
+  fetches: number // logged only: fetches cost tokens (counted below), no fee
   input: number
   output: number
 }
 
 function addUsage(total: Usage, usage: Anthropic.Messages.Usage): void {
   total.searches += usage.server_tool_use?.web_search_requests ?? 0
+  total.fetches += usage.server_tool_use?.web_fetch_requests ?? 0
   // Cache reads/writes are input tokens too (billed at other rates).
   total.input += usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0)
   total.output += usage.output_tokens
@@ -98,8 +106,9 @@ async function askClaude(
     const timeLeft = DEADLINE_MS - (Date.now() - startedAt)
     if (timeLeft < 10_000) throw new Error('Time limit reached before Claude finished')
     // max_uses is per API request: give each continuation only what is left
-    // of the 15, so a run never pays for more than MAX_SEARCHES searches.
+    // of the 15 searches / 20 fetches, so a run never goes over the budget.
     const searchesLeft = MAX_SEARCHES - usage.searches
+    const fetchesLeft = MAX_FETCHES - usage.fetches
     if (searchesLeft <= 0 && reminded) throw new Error('Search budget used up without results')
 
     const response = await client.messages.create(
@@ -110,7 +119,7 @@ async function askClaude(
         // which matters with the 150 s limit. Thinking stays adaptive (default).
         output_config: { effort: 'low' },
         system: SYSTEM_PROMPT,
-        tools: [webSearchTool(Math.max(searchesLeft, 1)), SUBMIT_RESULTS_TOOL],
+        tools: [webSearchTool(Math.max(searchesLeft, 1)), webFetchTool(Math.max(fetchesLeft, 1)), SUBMIT_RESULTS_TOOL],
         messages,
       },
       { timeout: timeLeft, maxRetries: 1 },
@@ -220,7 +229,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const startedAt = Date.now()
-  const usage: Usage = { searches: 0, input: 0, output: 0 }
+  const usage: Usage = { searches: 0, fetches: 0, input: 0, output: 0 }
   const finish = (fields: Record<string, unknown>) =>
     admin
       .from('search_runs')
@@ -244,8 +253,9 @@ Deno.serve(async (req: Request) => {
     const client = new Anthropic({ apiKey: anthropicKey })
     const raw = await askClaude(client, mode, params, profile as Profile | null, appliedCompanies, usage, startedAt)
 
-    // 5. Validate and store. already_applied is set by a database trigger.
-    const { results, dropped } = validateResults(raw, mode)
+    // 5. Validate (incl. the profile's dealbreakers) and store.
+    // already_applied is set by a database trigger.
+    const { results, dropped, droppedBy } = validateResults(raw, mode, rulesFromProfile(profile))
     let stored: unknown[] = []
     if (results.length > 0) {
       const { data, error } = await admin
@@ -256,13 +266,15 @@ Deno.serve(async (req: Request) => {
       stored = (data ?? []).sort((a: { score: number }, b: { score: number }) => b.score - a.score)
     }
     await finish({ status: 'success' })
-    console.log(`search run ${runId} (${mode}): ${stored.length} results, ${dropped} dropped, ` +
-      `${usage.searches} searches, ${usage.input} in / ${usage.output} out tokens`)
+    console.log(`search run ${runId} (${mode}): ${stored.length} results, ${dropped} dropped ` +
+      `${JSON.stringify(droppedBy)}, ${usage.searches} searches, ${usage.fetches} fetches, ` +
+      `${usage.input} in / ${usage.output} out tokens, ${Math.round((Date.now() - startedAt) / 1000)} s`)
 
     return json(200, {
       run_id: runId,
       results: stored,
       dropped,
+      dropped_by: droppedBy,
       usage: { searches: usage.searches, input_tokens: usage.input, output_tokens: usage.output },
     })
   } catch (error) {

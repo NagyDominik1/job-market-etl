@@ -8,7 +8,9 @@
 //     anything, not just what the form allows)
 //   - Claude's results: built from web pages, which can contain anything, even
 //     text written to trick an AI ("prompt injection"). So every field is
-//     checked, cut to a maximum length, and links must be http(s).
+//     checked, cut to a maximum length, and links must be http(s). Job results
+//     must also link to one posting (not a list) and pass the profile's
+//     dealbreakers: the code enforces them, the prompt alone is not enough.
 
 export const MODES = ['jobs', 'companies'] as const
 export type Mode = (typeof MODES)[number]
@@ -143,21 +145,142 @@ export function validateRequest(body: unknown): Ok<{ mode: Mode; params: SearchP
   }
 }
 
+// --- posting URLs ------------------------------------------------------------------------
+
+// A job result must link to ONE posting, not to a list of postings. These are
+// the usual shapes of list pages; a heuristic, so the main check is still that
+// Claude opened the page (confirmed). Both together catch most mistakes.
+
+// ?q=php, ?keyword=..., ?page=2: a search or a paged list.
+const LISTING_QUERY_KEYS = new Set([
+  'q', 'query', 'keyword', 'keywords', 'search', 's', 'kw', 'term', 'text', 'page',
+  'category', 'kategoria', 'kategorija', 'kulcsszo', 'pretraga',
+])
+// A path segment that marks a search or category page wherever it appears.
+const LISTING_SEGMENTS = new Set([
+  'search', 'kereses', 'pretraga', 'results', 'category', 'categories', 'kategoria', 'kategorija',
+  'tag', 'tags', 'allasok', 'allasajanlatok', 'oglasi', 'oglasi-za-posao',
+])
+// The LAST path segment of an index page ("/careers", "/jobs/").
+const INDEX_SEGMENTS = new Set([
+  'jobs', 'careers', 'career', 'karrier', 'karriera', 'kariera', 'karijera', 'poslovi', 'posao',
+  'openings', 'positions', 'open-positions', 'vacancies', 'konkursi', 'job-openings',
+])
+// ATS hosts where /<company> alone is the company's job list.
+const ATS_HOSTS = new Set([
+  'boards.greenhouse.io', 'job-boards.greenhouse.io', 'jobs.lever.co', 'apply.workable.com',
+  'jobs.smartrecruiters.com', 'jobs.ashbyhq.com',
+])
+
+/** True when the URL looks like a list of postings (search, category, careers index). */
+export function isListingUrl(value: string): boolean {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return true // not a URL at all: certainly not a posting
+  }
+  const segments = url.pathname.split('/').filter((s) => s !== '').map((s) => s.toLowerCase())
+  if (segments.length === 0) return true // a homepage
+  if ([...url.searchParams.keys()].some((key) => LISTING_QUERY_KEYS.has(key.toLowerCase()))) return true
+  if (segments.some((s) => LISTING_SEGMENTS.has(s))) return true
+  if (INDEX_SEGMENTS.has(segments[segments.length - 1])) return true
+  if (ATS_HOSTS.has(url.hostname.toLowerCase()) && segments.length === 1) return true
+  return false
+}
+
+// --- profile rules for job results -------------------------------------------------------
+
+/** The dealbreakers the code enforces itself (the prompt asks for them too). */
+export interface ResultRules {
+  allowedSeniority: string[] // from the profile; empty = any level
+  minYearsRequired: number | null // drop postings asking for this many years or more
+  titleKeywords: string[] // drop titles containing one of these (lowercase)
+}
+
+export const NO_RULES: ResultRules = { allowedSeniority: [], minYearsRequired: null, titleKeywords: [] }
+
+/** ResultRules from the search_profile row (null or missing fields = no rule). */
+export function rulesFromProfile(profile: { seniority?: unknown; dealbreakers?: unknown } | null): ResultRules {
+  if (!profile) return NO_RULES
+  const dealbreakers = (typeof profile.dealbreakers === 'object' && profile.dealbreakers !== null
+    ? profile.dealbreakers
+    : {}) as Record<string, unknown>
+  const years = dealbreakers.min_years_required
+  return {
+    allowedSeniority: (stringList(profile.seniority, 5, 10) ?? []).map((level) => level.toLowerCase()),
+    minYearsRequired: typeof years === 'number' && years > 0 ? years : null,
+    titleKeywords: (stringList(dealbreakers.title_keywords, 50, 60) ?? []).map((word) => word.toLowerCase()),
+  }
+}
+
+// Seniority words in a title, per level ("Senior PHP Developer", "Szenior
+// fejlesztő", "Sr. Backend", "Tech Lead", "Vezető fejlesztő"). \p{L} instead
+// of \b, so accented letters count as letters.
+const TITLE_LEVEL_WORDS: Record<string, RegExp> = {
+  senior: /(?<![\p{L}\p{N}])(senior|szenior|sr|principal)(?![\p{L}\p{N}])/iu,
+  lead: /(?<![\p{L}\p{N}])(lead|vezető|vezeto)(?![\p{L}\p{N}])/iu,
+}
+
+/** Why a job result breaks a profile rule, or null when it is fine. */
+export function dealbreaker(
+  item: { title: string; seniority: unknown; years_required: unknown },
+  rules: ResultRules,
+): string | null {
+  const allowed = rules.allowedSeniority
+  if (allowed.length > 0) {
+    const level = typeof item.seniority === 'string' ? item.seniority.toLowerCase() : 'unknown'
+    if (level !== 'unknown' && (SENIORITIES as readonly string[]).includes(level) && !allowed.includes(level)) {
+      return `seniority ${level}`
+    }
+    for (const [titleLevel, pattern] of Object.entries(TITLE_LEVEL_WORDS)) {
+      if (!allowed.includes(titleLevel) && pattern.test(item.title)) return `${titleLevel} in the title`
+    }
+  }
+  const years = item.years_required
+  if (rules.minYearsRequired !== null && typeof years === 'number' && years >= rules.minYearsRequired) {
+    return `requires ${years} years`
+  }
+  const title = item.title.toLowerCase()
+  const keyword = rules.titleKeywords.find((word) => title.includes(word))
+  return keyword ? `title contains "${keyword}"` : null
+}
+
 // --- Claude's results --------------------------------------------------------------------
 
 export const MAX_RESULTS = 30
 
+/** Why results were dropped, counted per reason (logged and returned to the page). */
+export interface DroppedBy {
+  invalid: number // no company/title, bad score, not an object
+  duplicate: number
+  over_limit: number
+  unconfirmed: number // jobs: Claude did not open the posting page
+  listing_url: number // jobs: no URL, or a search/category/careers-index URL
+  dealbreaker: number // jobs: seniority, years or title keyword from the profile
+}
+
 /**
  * Turn the submit_results tool input into rows we can store. Invalid items are
  * dropped (and counted), never "fixed up": a result without a company or with
- * a score outside 0-100 is not trustworthy.
+ * a score outside 0-100 is not trustworthy. Job results must also be confirmed
+ * from the posting itself, link to that posting, and pass the profile rules.
  */
-export function validateResults(input: unknown, mode: Mode): { results: SearchResult[]; dropped: number } {
-  const items = (input as { results?: unknown } | null)?.results
-  if (!Array.isArray(items)) return { results: [], dropped: 0 }
-
+export function validateResults(
+  input: unknown,
+  mode: Mode,
+  rules: ResultRules = NO_RULES,
+): { results: SearchResult[]; dropped: number; droppedBy: DroppedBy } {
+  const droppedBy: DroppedBy = { invalid: 0, duplicate: 0, over_limit: 0, unconfirmed: 0, listing_url: 0, dealbreaker: 0 }
   const results: SearchResult[] = []
-  let dropped = 0
+  const done = () => {
+    results.sort((a, b) => b.score - a.score)
+    const dropped = Object.values(droppedBy).reduce((sum, n) => sum + n, 0)
+    return { results, dropped, droppedBy }
+  }
+
+  const items = (input as { results?: unknown } | null)?.results
+  if (!Array.isArray(items)) return done()
   const seen = new Set<string>()
 
   for (const raw of items.slice(0, MAX_RESULTS * 2)) {
@@ -169,14 +292,38 @@ export function validateResults(input: unknown, mode: Mode): { results: SearchRe
       companyName !== '' &&
       (mode === 'companies' || title !== '') &&
       typeof score === 'number' && Number.isInteger(score) && score >= 0 && score <= 100
+    if (!valid) {
+      droppedBy.invalid++
+      continue
+    }
 
     // The same company/position twice in one answer: keep the first.
     const key = `${companyName.toLowerCase()}|${title.toLowerCase()}`
-    if (!valid || seen.has(key) || results.length >= MAX_RESULTS) {
-      dropped++
+    if (seen.has(key)) {
+      droppedBy.duplicate++
       continue
     }
     seen.add(key)
+
+    const url = httpUrl(item.url)
+    if (mode === 'jobs') {
+      if (item.confirmed !== true) {
+        droppedBy.unconfirmed++
+        continue
+      }
+      if (url === null || isListingUrl(url)) {
+        droppedBy.listing_url++
+        continue
+      }
+      if (dealbreaker({ title, seniority: item.seniority, years_required: item.years_required }, rules)) {
+        droppedBy.dealbreaker++
+        continue
+      }
+    }
+    if (results.length >= MAX_RESULTS) {
+      droppedBy.over_limit++
+      continue
+    }
 
     results.push({
       kind: mode === 'jobs' ? 'job' : 'company',
@@ -184,13 +331,12 @@ export function validateResults(input: unknown, mode: Mode): { results: SearchRe
       company_name: companyName,
       city: cleanText(item.city, 100) || null,
       remote: typeof item.remote === 'boolean' ? item.remote : null,
-      url: httpUrl(item.url),
+      url,
       deadline: mode === 'jobs' ? isoDate(item.deadline) : null,
       contact: mode === 'companies' ? contact(item.contact) : null,
       reasons: stringList(item.reasons, 6, 200) ?? [],
       score: score as number,
     })
   }
-  results.sort((a, b) => b.score - a.score)
-  return { results, dropped }
+  return done()
 }

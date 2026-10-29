@@ -4,7 +4,9 @@
 import type { Mode, SearchParams } from './validate.ts'
 
 export const MODEL = 'claude-haiku-5-5'
-export const MAX_SEARCHES = 15
+export const MAX_SEARCHES = 15 // web searches per run ($10 per 1000)
+export const MAX_FETCHES = 20 // posting pages opened per run (no extra fee, only tokens)
+const FETCH_MAX_TOKENS = 8000 // per page: a posting fits, a huge page is cut
 
 /** The search_profile row (migration 007); every field may be empty. */
 export interface Profile {
@@ -48,8 +50,24 @@ export const SUBMIT_RESULTS_TOOL = {
               description: '2-5 short reasons for the score, e.g. "+ PHP and MySQL in the stack", "- Budapest only"',
             },
             score: { type: 'integer', description: 'Fit with the profile, 0-100' },
+            // The next three let the code check the dealbreakers itself
+            // (validate.ts); they are not stored.
+            seniority: {
+              type: 'string',
+              enum: ['intern', 'junior', 'mid', 'senior', 'lead', 'unknown'],
+              description: 'Jobs: the level the posting itself states; "unknown" if it states none. Companies: "unknown"',
+            },
+            years_required: {
+              type: 'integer',
+              description: 'Jobs: minimum years of experience the posting requires (lower bound of a range); 0 if not stated',
+            },
+            confirmed: {
+              type: 'boolean',
+              description: 'Jobs: true only if you opened this exact url with web_fetch and it is the posting itself. Companies: false',
+            },
           },
-          required: ['title', 'company_name', 'city', 'remote', 'url', 'deadline', 'contact', 'reasons', 'score'],
+          required: ['title', 'company_name', 'city', 'remote', 'url', 'deadline', 'contact', 'reasons', 'score',
+            'seniority', 'years_required', 'confirmed'],
           additionalProperties: false,
         },
       },
@@ -77,7 +95,8 @@ Rules:
 - Do not report companies from the "already applied" list.
 - Score honestly with the rubric given; the reasons must explain the score.
 - Results ordered by score, best first, at most 20.
-- Be efficient: plan your searches, and call submit_results before you run out of searches.`
+- Be efficient: plan your searches and fetches, and call submit_results before you run out
+  of either.`
 
 function list(items: string[], empty = '(any)'): string {
   return items.length ? items.join(', ') : empty
@@ -98,15 +117,44 @@ function describeProfile(profile: Profile | null): string {
     `- Cities in priority order (first = most wanted): ${list(profile.cities)}`,
     `- Languages: ${languages || '(none given)'}`,
     `- Preferred roles: ${list(profile.preferred_roles)}`,
-    `- Dealbreakers (never report such results): ${JSON.stringify(profile.dealbreakers)}`,
+    describeDealbreakers(profile),
   ].join('\n')
 }
 
-const JOBS_RUBRIC = `Task: find CURRENTLY OPEN job postings that fit the profile and the parameters.
-Skip postings that are closed, expired, or older than about 6 weeks.
+/** The dealbreakers as plain rules (the code checks the same ones, validate.ts). */
+function describeDealbreakers(profile: Profile): string {
+  const d = profile.dealbreakers ?? {}
+  const rules: string[] = []
+  if (profile.seniority.length) rules.push(`the posting's level is not one of: ${profile.seniority.join(', ')} (e.g. senior, lead)`)
+  if (typeof d.min_years_required === 'number') rules.push(`it requires ${d.min_years_required} or more years of experience`)
+  if (Array.isArray(d.title_keywords) && d.title_keywords.length) rules.push(`the title contains: ${d.title_keywords.join(', ')}`)
+  if (Array.isArray(d.required_languages_missing) && d.required_languages_missing.length) {
+    rules.push(`it requires one of these languages: ${d.required_languages_missing.join(', ')}`)
+  }
+  return rules.length
+    ? `- Dealbreakers (never report a posting if ANY is true): ${rules.join('; ')}`
+    : '- Dealbreakers: (none)'
+}
+
+const JOBS_RUBRIC = `Task: find 10-20 CURRENTLY OPEN job postings that fit the profile and the parameters.
+
+How to work:
+1. Search widely, up to ${MAX_SEARCHES} searches: one search per city and role (e.g. "junior PHP
+   developer Szeged", "PHP programer Subotica"), in the local language too (Hungarian:
+   "fejlesztő", "programozó", "állás"; Serbian: "programer", "posao"). Use the local job sites
+   (Hungary: profession.hu; Serbia: helloworld.rs, poslovi.infostud.com, joberty.com), LinkedIn,
+   and company career pages (site: queries help).
+2. Open every candidate posting with web_fetch (up to ${MAX_FETCHES} pages) and read title, company,
+   city, seniority, years of experience and deadline FROM THE POSTING ITSELF.
+3. Report only postings you opened and confirmed (confirmed: true). The url must be that
+   single posting page: never a search-results page, a category/list page or a careers index.
+   If you can only find a list page, open it and fetch the individual postings it links to.
+4. Skip postings that are closed, expired, or older than about 6 weeks, and every posting
+   that hits a dealbreaker. Fewer confirmed results are better than unconfirmed ones.
+
 Score 0-100: skills match 40 (more matched skills at higher levels = more), seniority fit 25,
 city 20 (by the priority order; remote counts if wanted), role fit 15 (a preferred role in
-the title). Any dealbreaker -> do not report it.`
+the title).`
 
 const COMPANIES_RUBRIC = `Task: find IT COMPANIES (software, IT services, product companies with an
 engineering team) in the given cities that are worth an open (unsolicited) application,
@@ -156,6 +204,22 @@ export function webSearchTool(maxUses: number) {
     // The raw search results are filtered by code inside the API (dynamic
     // filtering); "excluded" = don't send them back to us, only Claude's
     // answer. We never show raw web content, so this saves tokens.
+    response_inclusion: 'excluded' as const,
+  }
+}
+
+/**
+ * The web fetch tool: Claude opens a candidate posting to confirm its details.
+ * It can only fetch URLs that came from search or fetch results (an API rule),
+ * and Anthropic's fetcher respects robots.txt: single pages on demand, no crawling.
+ */
+export function webFetchTool(maxUses: number) {
+  return {
+    type: 'web_fetch_20260318' as const,
+    name: 'web_fetch' as const,
+    max_uses: maxUses,
+    max_content_tokens: FETCH_MAX_TOKENS,
+    // Same as for search: don't echo the raw page text back to us.
     response_inclusion: 'excluded' as const,
   }
 }
