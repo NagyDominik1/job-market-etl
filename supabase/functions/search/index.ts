@@ -110,7 +110,7 @@ async function askClaude(
         // which matters with the 150 s limit. Thinking stays adaptive (default).
         output_config: { effort: 'low' },
         system: SYSTEM_PROMPT,
-        tools: [webSearchTool(params, Math.max(searchesLeft, 1)), SUBMIT_RESULTS_TOOL],
+        tools: [webSearchTool(Math.max(searchesLeft, 1)), SUBMIT_RESULTS_TOOL],
         messages,
       },
       { timeout: timeLeft, maxRetries: 1 },
@@ -156,7 +156,8 @@ const KEY_PATTERN = /sk-ant-[A-Za-z0-9_-]+/g
 /**
  * A short, safe error text for the database and the browser. For API errors:
  * status + the error type and message from the response BODY (e.g.
- * "invalid_request_error: tools.0.user_location: ...") + the request id, so
+ * "invalid_request_error: tools.0.web_search_20260318: Country code HU is not
+ * supported.") + the request id, so
  * the cause is visible in search_runs.error. Never the headers or the request:
  * the body's message is all we need, and it doesn't contain the key.
  */

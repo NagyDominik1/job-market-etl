@@ -160,10 +160,13 @@ test('submit_results is strict and every object forbids extra fields', () => {
   assert.deepEqual([...item.required].sort(), Object.keys(item.properties).sort())   // strict needs all required
 })
 
-test('web search tool: current version, max_uses, localized to the first country', () => {
-  const tool = webSearchTool({ ...PARAMS, countries: ['RS', 'HU'] }, 15)
+test('web search tool: current version, max_uses, results excluded', () => {
+  const tool = webSearchTool(15)
   assert.equal(tool.type, 'web_search_20260318')
   assert.equal(tool.max_uses, 15)
-  assert.deepEqual(tool.user_location, { type: 'approximate', country: 'RS' })
-  assert.equal('user_location' in webSearchTool({ ...PARAMS, countries: [] }, 15), false)
+  assert.equal(tool.response_inclusion, 'excluded')
+})
+
+test('web search tool has no user_location (the API rejected "HU" with a 400)', () => {
+  assert.equal('user_location' in webSearchTool(15), false)
 })

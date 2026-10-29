@@ -143,8 +143,12 @@ export function buildUserPrompt(
   ].join('\n')
 }
 
-/** The web search tool. user_location localizes results to the first country. */
-export function webSearchTool(params: SearchParams, maxUses: number) {
+/**
+ * The web search tool. No user_location: the API rejects some country codes
+ * (run 1: "Country code HU is not supported." -> 400), and the countries and
+ * cities are already in the prompt, so Claude puts them into its queries.
+ */
+export function webSearchTool(maxUses: number) {
   return {
     type: 'web_search_20260318' as const,
     name: 'web_search' as const,
@@ -153,6 +157,5 @@ export function webSearchTool(params: SearchParams, maxUses: number) {
     // filtering); "excluded" = don't send them back to us, only Claude's
     // answer. We never show raw web content, so this saves tokens.
     response_inclusion: 'excluded' as const,
-    ...(params.countries[0] ? { user_location: { type: 'approximate' as const, country: params.countries[0] } } : {}),
   }
 }
