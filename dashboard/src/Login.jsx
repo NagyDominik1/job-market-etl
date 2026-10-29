@@ -16,7 +16,10 @@ export default function Login() {
         // exist in Supabase (me) can log in. Sign-ups are disabled there too.
         shouldCreateUser: false,
         // Where the magic link sends me back: this site (local or Vercel).
-        emailRedirectTo: window.location.origin,
+        // The trailing "/" matters: the Redirect URLs allow-list has
+        // "http://localhost:5173/**", which a bare origin (no path) doesn't
+        // match, and then Supabase silently falls back to the Site URL (Vercel).
+        emailRedirectTo: `${window.location.origin}/`,
       },
     })
     if (error) {

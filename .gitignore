@@ -23,3 +23,6 @@ config/profile.yaml
 
 # Connection settings for the Supabase database (DATABASE_URL etc.): a secret.
 .env.supabase
+
+# The filled-in search_profile SQL (my real profile); the template is committed.
+sql/search_profile_local.sql

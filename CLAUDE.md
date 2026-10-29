@@ -222,6 +222,12 @@ Rules: migrations are additive only; all existing tests must pass; secrets never
 Phases 7 and 8 merged into main; tag v2.0 = main before Phase 9 (6a45ceb).
 Phase 9.1 merged into main (2026-10-29): migration 006 (applications,
 application_events, trigger, todays_actions/expiring views, SELECT-only access), applied
-to Supabase. Next: 9.2 (I create the Anthropic key with a monthly spend limit and store it
-as the Edge Function secret ANTHROPIC_API_KEY myself).
+to Supabase.
+Phase 9.3 merged into main (2026-10-29): migration 007 (search_profile, search_runs,
+search_results) applied to Supabase; Edge Function "search" deployed (verify_jwt = true);
+Keresés tab on the dashboard. The search_profile row is filled from the gitignored
+sql/search_profile_local.sql. Not yet tested end to end (one real search on Vercel).
+Localhost magic-link login still redirects to Vercel (emailRedirectTo now ends in "/";
+check the Supabase email template and Redirect URLs).
+Next: 9.4 (Jelentkezéseim tab).
 Open phases: 4 (Gmail IMAP), 5 (ATS), 6 (report).

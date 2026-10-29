@@ -1,7 +1,7 @@
 // Input and output validation for the "search" Edge Function.
 //
 // Pure functions, no Deno or npm imports, so the same file runs in the Edge
-// Function (Deno) and in the tests (Node: node --test supabase/functions/search/).
+// Function (Deno) and in the tests (Node: node --test "supabase/functions/search/*.test.ts").
 //
 // Two directions, both untrusted:
 //   - the request body: comes from the browser (anyone with a login could send
