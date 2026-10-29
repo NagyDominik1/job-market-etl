@@ -220,8 +220,8 @@ Rules: migrations are additive only; all existing tests must pass; secrets never
 
 ## Current status
 Phases 7 and 8 merged into main; tag v2.0 = main before Phase 9 (6a45ceb).
-Phase 9.1 done (branch phase-9-1-tracker): migration 006 (applications,
-application_events, trigger, todays_actions/expiring views, SELECT-only access) applied to
-Supabase on 2026-10-29. Next: merge into main after my approval, then 9.2 (I create the
-Anthropic key and store it as an Edge Function secret myself).
+Phase 9.1 merged into main (2026-10-29): migration 006 (applications,
+application_events, trigger, todays_actions/expiring views, SELECT-only access), applied
+to Supabase. Next: 9.2 (I create the Anthropic key with a monthly spend limit and store it
+as the Edge Function secret ANTHROPIC_API_KEY myself).
 Open phases: 4 (Gmail IMAP), 5 (ATS), 6 (report).
