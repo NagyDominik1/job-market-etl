@@ -38,6 +38,14 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   enrich: one row per run (rows_extracted = rows_loaded = jobs scored, rows_enriched =
   rows changed by rules/Claude, error_message = summary)
 - schema_migrations (version, filename, checksum, applied_at) — managed by src/migrate.py
+- applications (006; id, company_name, company_key GENERATED from normalize_company_key(),
+  position NULL = open application, city, language hu/sr/en, cv_variant hu/en, job_id FK ->
+  jobs ON DELETE SET NULL, posting_url, deadline, applied_at, status saved/sent/in_progress/
+  rejected/no_response/offer, next_action_date, next_action_reason (Hungarian), notes,
+  created_at, updated_at (BEFORE UPDATE trigger))
+- application_events (006; id, application_id FK ON DELETE CASCADE, event_type, occurred_at
+  DATE default local_today(), body, stated_date; stated_date required for 'stated_date')
+- Views todays_actions, expiring (006, security_invoker)
 
 ## Decisions
 - Simple SQL migrations instead of Alembic/SQLAlchemy: numbered plain .sql files in
@@ -125,6 +133,22 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   The migration creates anon/authenticated locally when missing.
 - Future migrations that add tables: enable RLS and REVOKE from anon/authenticated
   explicitly (Supabase's default privileges grant ALL on new tables).
+- Tracker rules live in the database (006): an AFTER INSERT trigger on application_events
+  sets the application's status + next action (saved: deadline-2; sent: +21 and applied_at;
+  forwarded: +14; stated_date: that date; reply/interview: stated_date or +14;
+  follow_up_sent: +14, the 2nd since the last sent/forwarded/stated_date/reply/interview
+  (by id = insertion order) -> no_response; rejection/offer: final; note: nothing). Dates
+  count from occurred_at. The dashboard only inserts events.
+- company_key is a GENERATED column computed by normalize_company_key() (plpgsql, the SQL
+  twin of normalize_company; accents via an explicit translate() list, no unaccent
+  extension). test_company_key_matches_python_normalize_company keeps them equal: change
+  both together.
+- "Today" for the tracker = local_today() = Budapest date (Supabase runs in UTC).
+- Functions: SET search_path = '' when only built-ins are used; SET search_path FROM
+  CURRENT when they use our tables (works in "public" and in the test schemas).
+- A database ahead of the code is safe: migrate.py ignores applied versions without a file
+  (test_database_ahead_of_the_code_is_fine), so a branch's migration can be applied to
+  Supabase before main has the file.
 - Node/npm for the dashboard: versions pinned in package.json, package-lock.json
   committed; Node is not required for the pipeline.
 
@@ -195,9 +219,9 @@ Rules: migrations are additive only; all existing tests must pass; secrets never
   understand for an interview.
 
 ## Current status
-Phase 7 done and merged into main (daily workflow active).
-Phase 8a done (branch phase-8-dashboard): migration 005 (job_feed + read-only access)
-applied to Supabase, dashboard works locally (login + list verified).
-Next: merge into main after my approval, then deploy on Vercel (Root Directory =
-dashboard) and add the Vercel URL to Supabase Site URL / Redirect URLs.
+Phases 7 and 8 merged into main; tag v2.0 = main before Phase 9 (6a45ceb).
+Phase 9.1 done (branch phase-9-1-tracker): migration 006 (applications,
+application_events, trigger, todays_actions/expiring views, SELECT-only access) applied to
+Supabase on 2026-10-29. Next: merge into main after my approval, then 9.2 (I create the
+Anthropic key and store it as an Edge Function secret myself).
 Open phases: 4 (Gmail IMAP), 5 (ATS), 6 (report).

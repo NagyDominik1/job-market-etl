@@ -53,6 +53,7 @@ flowchart LR
 | **Score** | A deterministic 0-100 **match score** against `config/profile.yaml`, with the reasons (`"+ PHP (3)"`, `"- requires 3+ years: score 0"`). Recomputed for every job on every run. | `src/scoring.py` |
 | **Report** | At the end of each run: how many jobs are new, and the top 10 new ones with their reasons, in the log. | `src/main.py` |
 | **Dashboard** | A private React page (magic-link login, only my account) listing `job_feed` by score, with filters. Read-only. | `dashboard/`, `migrations/005_*.sql` |
+| **Tracker** | My applications and what happened to them; a trigger turns each event into the next follow-up date (phase 9, database part done). | `migrations/006_*.sql` |
 
 Every step writes a row to `etl_runs` (status, row counts, error message).
 
@@ -64,10 +65,11 @@ Every step writes a row to `etl_runs` (status, row counts, error message).
 | Raw data in Postgres, plain-SQL migrations | Company ATS extractors, `companies.yaml` (phase 5) |
 | Cross-source deduplication (fingerprint) | A proper "new postings" report (phase 6) |
 | Rule-based enrichment (EN/DE/HU/SR), optional Claude | Dashboard deployed on Vercel (works locally today) |
+| Application tracker tables + follow-up trigger (9.1) | Job search assistant on the dashboard: AI search, tracker tab, letter drafts (phase 9.2-9.5) |
 | Match score with reasons, profile in YAML | |
 | Daily GitHub Actions run against Supabase | |
 | Private read-only dashboard (React, magic-link login) | |
-| ~310 tests (unit + local-database tests) | |
+| ~370 tests (unit + local-database tests) | |
 
 ## Quick start (local, Docker only)
 
@@ -220,6 +222,38 @@ URLs (`http://localhost:5173/**`, the Vercel URL) in *Authentication -> URL
 Configuration*. Deployment: Vercel project with **Root Directory = `dashboard`** and the
 two `VITE_` environment variables.
 
+## Application tracker (phase 9.1)
+
+Migration [`006_application_tracker.sql`](migrations/006_application_tracker.sql), tested
+in `tests/test_tracker.py`. Database only for now; the dashboard tab comes in 9.4.
+
+- `applications`: company, position (empty = open application), letter language
+  (`hu`/`sr`/`en`), CV variant, optional link to a pipeline job, deadline, status and the
+  **next action** (date + a Hungarian reason, e.g. "3 hete elküldve, írj emlékeztetőt").
+- `application_events`: what happened. Inserting an event fires a trigger that updates the
+  application, so the follow-up rules live in one place:
+
+| Event | Status | Next action |
+|-------|--------|-------------|
+| `saved` | saved | deadline - 2 days (none without a deadline) |
+| `sent` | sent (`applied_at` = event date) | + 21 days |
+| `forwarded` | in_progress | + 14 days |
+| `stated_date` | in_progress | the date they gave |
+| `reply`, `interview` | in_progress | the given date, else + 14 days |
+| `follow_up_sent` | unchanged | + 14 days; the 2nd one since their last sign of life -> `no_response`, none |
+| `rejection` / `offer` | rejected / offer | none |
+| `note` | unchanged | unchanged |
+
+- `company_key` is a **generated column**: `normalize_company_key()` is the SQL twin of
+  `normalize_company()` in Python (a test checks they agree), so `ErdSoft d.o.o.` and
+  `ERDSOFT Kft.` give `erdsoft` whoever inserts the row (dashboard, Edge Function). The AI
+  search (9.3) uses it to skip companies I already applied to.
+- Views `todays_actions` ("Ma teendő": active, next action due) and `expiring` (saved,
+  deadline passed or within 3 days), both `security_invoker`. "Today" is Budapest time
+  (`local_today()`), not the server's UTC date.
+- Access: RLS on, `SELECT` for `authenticated` only, `anon` nothing; write policies come
+  with the dashboard tab (9.4).
+
 ## Design decisions
 
 - **Raw data in the database.** Every posting is stored unchanged (JSONB) before any
@@ -268,7 +302,7 @@ two `VITE_` environment variables.
 ├── docker-compose.yml               # postgres + pipeline (+ pipeline-supabase, opt-in)
 ├── Dockerfile                       # the pipeline image (python:3.14.8-slim, non-root)
 ├── config/profile.example.yaml      # profile structure (my real profile.yaml is gitignored)
-├── migrations/                      # 001-005 plain SQL migrations
+├── migrations/                      # 001-006 plain SQL migrations
 ├── dashboard/                       # Vite + React dashboard (deployed separately)
 ├── data/manual/README.md            # CSV format (the CSV files themselves are gitignored)
 ├── sql/analysis.sql                 # example analysis queries
