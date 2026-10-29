@@ -95,18 +95,6 @@ def test_editing_an_applied_migration_is_detected(db_conn, tmp_path):
         apply_migrations(db_conn, tmp_path)
 
 
-def test_database_ahead_of_the_code_is_fine(db_conn, tmp_path):
-    # A migration is applied to Supabase from a feature branch before main has
-    # the file: the daily run on main must neither fail nor undo anything.
-    write(tmp_path, "001_a.sql", "CREATE TABLE a (id INT);")
-    write(tmp_path, "002_b.sql", "CREATE TABLE b (id INT);")
-    apply_migrations(db_conn, tmp_path)
-
-    (tmp_path / "002_b.sql").unlink()       # "main" doesn't know 002 yet
-    assert apply_migrations(db_conn, tmp_path) == []
-    assert table_exists(db_conn, "b")
-
-
 def test_real_migrations_create_the_v2_schema(db_conn):
     apply_migrations(db_conn)
     for table in ["sources", "raw_postings", "jobs", "job_enrichment", "etl_runs"]:

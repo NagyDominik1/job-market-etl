@@ -147,7 +147,7 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 - Functions: SET search_path = '' when only built-ins are used; SET search_path FROM
   CURRENT when they use our tables (works in "public" and in the test schemas).
 - A database ahead of the code is safe: migrate.py ignores applied versions without a file
-  (test_database_ahead_of_the_code_is_fine), so a branch's migration can be applied to
+  (tests/test_migrate_ahead.py), so a branch's migration can be applied to
   Supabase before main has the file.
 - Node/npm for the dashboard: versions pinned in package.json, package-lock.json
   committed; Node is not required for the pipeline.
