@@ -77,6 +77,24 @@ def test_a_failed_run_that_cost_tokens_does_not_count_either(conn):
     assert start_run(conn)[0] is not None
 
 
+def test_a_run_stuck_in_running_is_closed_as_timeout_and_does_not_count(conn):
+    # 009: the Edge Function was killed and never finished its run.
+    stuck, _ = start_run(conn)
+    conn.execute("UPDATE search_runs SET started_at = now() - interval '6 minutes' WHERE id = %s", (stuck,))
+    assert start_run(conn)[0] is not None
+    status, error, finished = conn.execute(
+        "SELECT status, error, finished_at FROM search_runs WHERE id = %s", (stuck,)).fetchone()
+    assert status == "error" and error.startswith("timeout") and finished is not None
+
+
+def test_a_recent_running_run_still_counts(conn):
+    # 4 minutes: maybe still working, so a second search must wait.
+    first, _ = start_run(conn)
+    conn.execute("UPDATE search_runs SET started_at = now() - interval '4 minutes' WHERE id = %s", (first,))
+    assert start_run(conn)[0] is None
+    assert conn.execute("SELECT status FROM search_runs WHERE id = %s", (first,)).fetchone() == ("running",)
+
+
 def test_a_successful_run_still_counts(conn):
     first, _ = start_run(conn)
     conn.execute("UPDATE search_runs SET status = 'success', input_tokens = 5000 WHERE id = %s", (first,))

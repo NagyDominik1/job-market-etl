@@ -152,12 +152,19 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 - Node/npm for the dashboard: versions pinned in package.json, package-lock.json
   committed; Node is not required for the pipeline.
 - AI search confirms job results with Anthropic's web_fetch (single posting pages Claude
-  found by search, max 20 per run, max 1 run per hour, robots.txt respected by the
+  found by search, max 8 per run, max 1 run per hour, robots.txt respected by the
   fetcher). Our code fetches nothing; this is on-demand reading of individual postings,
   not a crawler, so it stays within the "no scraping" rule. The code drops job results
   that aren't confirmed, link to a list/search page (isListingUrl, a heuristic), or hit a
   profile dealbreaker (seniority, min_years_required, title keywords) - the prompt asks
   for the same, the code enforces it.
+- Search run time budget: Supabase kills an Edge Function at 150 s wall clock (run 4 was
+  killed: 15 searches + 20 fetches, and a timeout retried by the SDK). Now max 8 searches +
+  8 fetches, no SDK retries, the whole run within 95 s: after 55 s Claude is told to stop
+  and submit what it has confirmed (25 s reserved for that), so confirmed results are
+  saved instead of lost; the response says stopped_early. A killed run can't close its
+  row, so start_search_run() (009) marks runs 'running' for > 5 min as 'error' (timeout);
+  'error' runs never count toward the 1-per-hour limit (008).
 - linkedin.com is never fetched (its terms forbid automated access): it is in web_fetch's
   blocked_domains (FETCH_BLOCKED_DOMAINS in validate.ts), so LinkedIn is used only through
   search results. A LinkedIn posting counts only if Claude finds and opens the same posting

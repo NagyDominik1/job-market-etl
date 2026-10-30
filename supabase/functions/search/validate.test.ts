@@ -8,7 +8,7 @@ import {
   FETCH_BLOCKED_DOMAINS, MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker, httpUrl, isFetchBlocked, isListingUrl, isoDate,
   rulesFromProfile, validateRequest, validateResults,
 } from './validate.ts'
-import { MAX_FETCHES, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool } from './prompt.ts'
+import { MAX_FETCHES, MAX_SEARCHES, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool } from './prompt.ts'
 
 const PARAMS = { countries: ['HU'], cities: ['Szeged'], remote: false, roles: [], seniority: [], languages: [] }
 
@@ -316,4 +316,12 @@ test('a job result linking to LinkedIn is dropped even if marked confirmed', () 
 test('the jobs prompt says LinkedIn is search-only', () => {
   const prompt = buildUserPrompt('jobs', PARAMS, null, [], '2026-10-29')
   assert.match(prompt, /Never fetch linkedin\.com/)
+})
+
+// --- time budget -------------------------------------------------------------------------------
+
+test('budgets stay small enough for the ~95 s run limit (run 4 with 15 + 20 was killed)', () => {
+  assert.ok(MAX_SEARCHES <= 8, `MAX_SEARCHES ${MAX_SEARCHES}`)
+  assert.ok(MAX_FETCHES <= 8, `MAX_FETCHES ${MAX_FETCHES}`)
+  assert.match(buildUserPrompt('jobs', PARAMS, null, [], '2026-10-30'), /up to 8/)
 })

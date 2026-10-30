@@ -28,10 +28,19 @@ import {
 } from './prompt.ts'
 import { type Mode, type SearchParams, rulesFromProfile, validateRequest, validateResults } from './validate.ts'
 
-// Supabase stops a function after 150 s (free plan). Stop on our own before
-// that, so the run can still be marked as failed and its cost recorded.
-const DEADLINE_MS = 130_000
-const MAX_REQUESTS = 6 // Claude API requests per run (pause_turn continuations + one reminder)
+// Supabase kills a function after 150 s (wall clock). Run 4 was killed: its
+// last request had timeout = time left AND one SDK retry, so it could take
+// twice as long. Now: no retries, and every run finishes within ~95 s.
+const TIME_BUDGET_MS = 95_000 // the whole run, Claude requests included
+const WRAP_UP_AFTER_MS = 55_000 // after this: "stop searching, submit what you confirmed"
+const WRAP_UP_RESERVE_MS = 25_000 // kept free for that last, short request
+const MAX_REQUESTS = 6 // Claude API requests per run (pause_turn continuations + wrap-up)
+
+// The message that ends a run early. Claude keeps everything it already found
+// (it is in the conversation), so the confirmed postings are saved, not lost.
+const WRAP_UP_MESSAGE =
+  'Time is up. Do not search or fetch anything else. Call submit_results now with only the ' +
+  'postings you have already opened and confirmed (an empty list if none).'
 
 // The page that calls us is on another origin (localhost / Vercel). '*' is
 // fine here: access is controlled by the Authorization header (a user token),
@@ -84,9 +93,14 @@ function addUsage(total: Usage, usage: Anthropic.Messages.Usage): void {
 }
 
 /**
- * Ask Claude. Returns the raw submit_results input (validated by the caller).
- * Adds every response's usage to `usage`, also when it throws, so a failed
- * run still records what it cost.
+ * Ask Claude. Returns the raw submit_results input (validated by the caller)
+ * and whether the run was cut short by the time budget. Adds every response's
+ * usage to `usage`, also when it throws, so a failed run still records its cost.
+ *
+ * Time: normal requests may use the budget minus WRAP_UP_RESERVE_MS. After
+ * WRAP_UP_AFTER_MS (or when a request times out after earlier rounds), one
+ * last request asks Claude to submit what it already confirmed; that request
+ * gets the reserve. So the run ends within TIME_BUDGET_MS either way.
  */
 async function askClaude(
   client: Anthropic,
@@ -96,50 +110,74 @@ async function askClaude(
   appliedCompanies: string[],
   usage: Usage,
   startedAt: number,
-): Promise<unknown> {
+): Promise<{ input: unknown; stoppedEarly: boolean }> {
   const messages: Anthropic.Messages.MessageParam[] = [
     { role: 'user', content: buildUserPrompt(mode, params, profile, appliedCompanies, budapestToday()) },
   ]
   let reminded = false
+  let wrappingUp = false
+  const elapsed = () => Date.now() - startedAt
+  const wrapUp = () => {
+    wrappingUp = true
+    messages.push({ role: 'user', content: WRAP_UP_MESSAGE })
+  }
 
   for (let request = 0; request < MAX_REQUESTS; request++) {
-    const timeLeft = DEADLINE_MS - (Date.now() - startedAt)
-    if (timeLeft < 10_000) throw new Error('Time limit reached before Claude finished')
+    const timeout = TIME_BUDGET_MS - elapsed() - (wrappingUp ? 0 : WRAP_UP_RESERVE_MS)
+    if (timeout < 5_000) throw new Error('Time limit reached before Claude finished')
     // max_uses is per API request: give each continuation only what is left
-    // of the 15 searches / 20 fetches, so a run never goes over the budget.
+    // of the budget, so a run never goes over it.
     const searchesLeft = MAX_SEARCHES - usage.searches
     const fetchesLeft = MAX_FETCHES - usage.fetches
     if (searchesLeft <= 0 && reminded) throw new Error('Search budget used up without results')
 
-    const response = await client.messages.create(
-      {
-        model: MODEL,
-        max_tokens: 16000,
-        // low effort: fewer, more consolidated tool calls -> faster and cheaper,
-        // which matters with the 150 s limit. Thinking stays adaptive (default).
-        output_config: { effort: 'low' },
-        system: SYSTEM_PROMPT,
-        tools: [webSearchTool(Math.max(searchesLeft, 1)), webFetchTool(Math.max(fetchesLeft, 1)), SUBMIT_RESULTS_TOOL],
-        messages,
-      },
-      { timeout: timeLeft, maxRetries: 1 },
-    )
+    let response: Anthropic.Messages.Message
+    try {
+      response = await client.messages.create(
+        {
+          model: MODEL,
+          max_tokens: 16000,
+          // low effort: fewer, more consolidated tool calls -> faster and cheaper,
+          // which matters with the time budget. Thinking stays adaptive (default).
+          output_config: { effort: 'low' },
+          system: SYSTEM_PROMPT,
+          tools: [webSearchTool(Math.max(searchesLeft, 1)), webFetchTool(Math.max(fetchesLeft, 1)), SUBMIT_RESULTS_TOOL],
+          messages,
+        },
+        // maxRetries 0: a retried timeout would double the time (run 4).
+        { timeout, maxRetries: 0 },
+      )
+    } catch (error) {
+      // A normal request ran out of time. If earlier rounds already found
+      // something (the conversation has more than the first message), ask
+      // for it with the reserved time instead of losing everything.
+      if (error instanceof Anthropic.APIConnectionTimeoutError && !wrappingUp && messages.length > 1) {
+        if (messages[messages.length - 1].role === 'assistant') wrapUp()
+        else wrappingUp = true // ends with a user message already: just retry it with the reserve
+        continue
+      }
+      if (error instanceof Anthropic.APIConnectionTimeoutError) throw new Error('Time limit reached before Claude finished')
+      throw error
+    }
     addUsage(usage, response.usage)
 
     const submit = response.content.find(
       (block): block is Anthropic.Messages.ToolUseBlock => block.type === 'tool_use' && block.name === 'submit_results',
     )
-    if (submit) return submit.input
+    if (submit) return { input: submit.input, stoppedEarly: wrappingUp }
 
     switch (response.stop_reason) {
       case 'pause_turn':
-        // The server-side search loop paused: send the turn back unchanged and
-        // it continues where it stopped (no extra user message).
+        // The server-side search loop paused: send the turn back. Normally it
+        // continues where it stopped; near the time budget, ask it to wrap up.
+        // (If it pauses during the wrap-up, repeat the request; the timeout
+        // check at the top of the loop still ends the run in time.)
         messages.push({ role: 'assistant', content: response.content })
+        if (wrappingUp || elapsed() >= WRAP_UP_AFTER_MS) wrapUp()
         continue
       case 'end_turn':
         // Answered in text instead of calling the tool: remind it once.
-        if (reminded) throw new Error('Claude did not return results')
+        if (reminded || wrappingUp) throw new Error('Claude did not return results')
         reminded = true
         messages.push({ role: 'assistant', content: response.content })
         messages.push({
@@ -251,7 +289,8 @@ Deno.serve(async (req: Request) => {
 
     // 4. Claude + web search.
     const client = new Anthropic({ apiKey: anthropicKey })
-    const raw = await askClaude(client, mode, params, profile as Profile | null, appliedCompanies, usage, startedAt)
+    const { input: raw, stoppedEarly } =
+      await askClaude(client, mode, params, profile as Profile | null, appliedCompanies, usage, startedAt)
 
     // 5. Validate (incl. the profile's dealbreakers) and store.
     // already_applied is set by a database trigger.
@@ -268,13 +307,15 @@ Deno.serve(async (req: Request) => {
     await finish({ status: 'success' })
     console.log(`search run ${runId} (${mode}): ${stored.length} results, ${dropped} dropped ` +
       `${JSON.stringify(droppedBy)}, ${usage.searches} searches, ${usage.fetches} fetches, ` +
-      `${usage.input} in / ${usage.output} out tokens, ${Math.round((Date.now() - startedAt) / 1000)} s`)
+      `${usage.input} in / ${usage.output} out tokens, ${Math.round((Date.now() - startedAt) / 1000)} s` +
+      (stoppedEarly ? ', stopped early (time budget)' : ''))
 
     return json(200, {
       run_id: runId,
       results: stored,
       dropped,
       dropped_by: droppedBy,
+      stopped_early: stoppedEarly, // the page tells me the list may be incomplete
       usage: { searches: usage.searches, input_tokens: usage.input, output_tokens: usage.output },
     })
   } catch (error) {

@@ -48,15 +48,41 @@ function formatTime(value) {
   return new Date(value).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' })
 }
 
-// The Edge Function answers errors with JSON {error, next_allowed_at?}.
-async function readFunctionError(error) {
-  try {
-    const body = await error.context.json()
-    if (body.next_allowed_at) return `Óránként egy keresés. Következő: ${formatTime(body.next_allowed_at)}`
-    return body.error || error.message
-  } catch {
-    return error.message
+const TIMEOUT_MESSAGE =
+  'A keresés túllépte az időkorlátot, a szerver leállította, ezért nem lett eredmény. ' +
+  'Ez nem számít bele az óránkénti keresésbe: pár perc múlva újrapróbálhatod, ' +
+  'esetleg kevesebb várossal vagy szerepkörrel.'
+
+// Errors from functions.invoke(), as a clear Hungarian message:
+//  - FunctionsFetchError: no answer at all (network, or the connection was cut)
+//  - our function's JSON error {error, next_allowed_at?} (429, 400, 502...)
+//  - a non-2xx WITHOUT our JSON: Supabase stopped the function (time limit)
+async function describeFunctionError(error) {
+  if (error.name === 'FunctionsFetchError') {
+    return 'Nem jött válasz a szervertől (hálózati hiba vagy időtúllépés). Próbáld újra pár perc múlva.'
   }
+  const status = error.context?.status
+  let body = null
+  try {
+    body = await error.context.json()
+  } catch {
+    // not our JSON: the function was stopped before it could answer
+  }
+  if (body?.next_allowed_at) return `Óránként egy keresés. Következő: ${formatTime(body.next_allowed_at)}`
+  if (body?.error) {
+    if (/time limit|timed out|timeout/i.test(body.error)) return TIMEOUT_MESSAGE
+    return `A keresés nem sikerült: ${body.error}`
+  }
+  if (status === 504 || status === 546 || status === undefined) return TIMEOUT_MESSAGE
+  return `A keresés nem sikerült (HTTP ${status}). Próbáld újra pár perc múlva.`
+}
+
+// The last run's status line: success, still running, or why it failed.
+function runOutcome(run, resultCount) {
+  if (run.status === 'success') return `${resultCount} találat`
+  if (run.status === 'running') return 'még fut (ha 5 percnél régebbi, a következő keresés lezárja)'
+  if (/timeout|time limit/i.test(run.error ?? '')) return 'időtúllépés, nincs eredmény'
+  return `hiba: ${run.error ?? run.status}`
 }
 
 function ResultCard({ result }) {
@@ -119,6 +145,7 @@ export default function SearchTab({ session }) {
   const [loading, setLoading] = useState(false)
   const [seconds, setSeconds] = useState(0)
   const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null) // e.g. "stopped early, the list may be incomplete"
 
   // On open: fill the form from search_profile, and show the last search.
   useEffect(() => {
@@ -165,6 +192,7 @@ export default function SearchTab({ session }) {
     event.preventDefault()
     setLoading(true)
     setError(null)
+    setNotice(null)
     const params = {
       countries: splitList(countries),
       cities: splitList(cities),
@@ -176,9 +204,16 @@ export default function SearchTab({ session }) {
     // invoke() sends my login token automatically (Authorization header).
     const { data, error } = await supabase.functions.invoke('search', { body: { mode, params } })
     if (error) {
-      setError(await readFunctionError(error))
+      setError(await describeFunctionError(error))
+      setResults([])
+      // Show the failed run's row too (its stored reason), if it has one.
+      const { data: runs } = await supabase.from('search_runs').select('*').order('started_at', { ascending: false }).limit(1)
+      setRun(runs?.[0] ?? null)
     } else {
       setResults(data.results)
+      if (data.stopped_early) {
+        setNotice('Időkorlát miatt a keresés korábban leállt: az eddig ellenőrzött találatok mentve, a lista hiányos lehet.')
+      }
       const { data: runs } = await supabase.from('search_runs').select('*').eq('id', data.run_id)
       setRun(runs?.[0] ?? null)
     }
@@ -238,15 +273,16 @@ export default function SearchTab({ session }) {
         <button type="submit" disabled={loading}>
           {loading ? `Keresés… ${seconds} s` : 'Keresés indítása'}
         </button>
-        <span className="hint">Óránként egy keresés; legfeljebb 15 webes keresés (~$0.15) és kb. 2 perc.</span>
+        <span className="hint">Óránként egy keresés; legfeljebb 8 webes keresés (~$0.08) és kb. 1,5 perc.</span>
       </form>
 
-      {error && <p className="status error">{error}</p>}
+      {error && <p className="status error" role="alert">{error}</p>}
+      {notice && <p className="status notice">{notice}</p>}
 
       {run && !loading && (
         <p className="status">
           Utolsó keresés: {formatTime(run.started_at)} · {run.mode === 'jobs' ? 'állások' : 'cégek'} ·{' '}
-          {run.status === 'success' ? `${results.length} találat` : `hiba: ${run.error ?? run.status}`} ·{' '}
+          {runOutcome(run, results.length)} ·{' '}
           {run.searches_used} webes keresés, {run.input_tokens + run.output_tokens} token · kb. $
           {estimateCost(run).toFixed(3)}
         </p>

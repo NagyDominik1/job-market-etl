@@ -4,8 +4,11 @@
 import { FETCH_BLOCKED_DOMAINS, type Mode, type SearchParams } from './validate.ts'
 
 export const MODEL = 'claude-haiku-5-5'
-export const MAX_SEARCHES = 15 // web searches per run ($10 per 1000)
-export const MAX_FETCHES = 20 // posting pages opened per run (no extra fee, only tokens)
+// Budgets per run. Small on purpose: every search or fetch takes seconds, and
+// a run must finish in ~95 s (Supabase kills the function at 150 s; run 4 with
+// 15 + 20 was killed).
+export const MAX_SEARCHES = 8 // web searches per run ($10 per 1000)
+export const MAX_FETCHES = 8 // posting pages opened per run (no extra fee, only tokens)
 const FETCH_MAX_TOKENS = 8000 // per page: a posting fits, a huge page is cut
 
 /** The search_profile row (migration 007); every field may be empty. */
@@ -136,10 +139,12 @@ function describeDealbreakers(profile: Profile): string {
     : '- Dealbreakers: (none)'
 }
 
-const JOBS_RUBRIC = `Task: find 10-20 CURRENTLY OPEN job postings that fit the profile and the parameters.
+const JOBS_RUBRIC = `Task: find CURRENTLY OPEN job postings that fit the profile and the parameters:
+as many confirmed postings as your fetch budget allows (up to ${MAX_FETCHES}). Time is short (about
+one minute), so work fast and pick the most promising candidates.
 
 How to work:
-1. Search widely, up to ${MAX_SEARCHES} searches: one search per city and role (e.g. "junior PHP
+1. Search, up to ${MAX_SEARCHES} searches: combine cities and roles sensibly (e.g. "junior PHP
    developer Szeged", "PHP programer Subotica"), in the local language too (Hungarian:
    "fejlesztő", "programozó", "állás"; Serbian: "programer", "posao"). Use the local job sites
    (Hungary: profession.hu; Serbia: helloworld.rs, poslovi.infostud.com, joberty.com) and
