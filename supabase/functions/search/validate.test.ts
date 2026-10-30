@@ -5,8 +5,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  FETCH_BLOCKED_DOMAINS, MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker, httpUrl, isFetchBlocked, isListingUrl, isoDate,
-  rulesFromProfile, runCounts, validateRequest, validateResults,
+  FETCH_BLOCKED_DOMAINS, LISTING_REASON, MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker, domainStats, httpUrl,
+  isFetchBlocked, isListingUrl, isoDate, normalizeUrl, rulesFromProfile, runCounts, validateRequest, validateResults,
 } from './validate.ts'
 import {
   FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MAX_FETCHES, MAX_SEARCHES, MIN_CANDIDATES, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT,
@@ -194,7 +194,7 @@ test('web fetch tool: current version, max_uses, page size capped, called direct
 test('the jobs prompt requires fetching before submitting', () => {
   const prompt = buildUserPrompt('jobs', PARAMS, null, [], '2026-10-30')
   assert.match(prompt, /web_search -> web_fetch -> submit_results/)
-  assert.match(prompt, /open postings before you submit/)
+  assert.match(prompt, /open postings or lists before you submit/)
   assert.match(FETCH_FIRST_MESSAGE, /open them with web_fetch/)
 })
 
@@ -382,33 +382,47 @@ const RUN6 = {
   roles: ['data engineer', 'backend', 'python developer', 'php developer'], seniority: ['intern', 'junior'], languages: [],
 }
 
-test('query plan: best city x best role first, local wording, one remote query, within the budget', () => {
+test('query plan: general local terms per city first, one remote query, roles only to fill (run 8)', () => {
   const plan = buildQueryPlan(RUN6)
   assert.equal(plan.length, MAX_SEARCHES)
-  assert.equal(plan[0], 'junior data engineer állás Szeged')               // top city + top role, Hungarian
-  assert.deepEqual(plan.slice(1, 3).sort(), ['junior backend állás Szeged', 'junior data engineer posao Subotica'])
-  assert.equal(plan[plan.length - 1], 'remote junior data engineer job')  // the slot kept for remote
-  assert.ok(plan.some((q) => q.endsWith('posao Novi Sad')))               // Serbian wording for Serbian cities
-  assert.equal(new Set(plan).size, plan.length)                           // no duplicates
+  assert.deepEqual(plan.slice(0, 3), [
+    'junior fejlesztő állás Szeged',       // top city, Hungarian general terms
+    'junior programozó állás Szeged',
+    'junior programer posao Subotica',     // the next city's first term comes early
+  ])
+  assert.ok(plan.includes('fejlesztő gyakornok állás Szeged'))       // intern wanted
+  assert.ok(plan.includes('programer praksa posao Novi Sad'))        // Serbian wording
+  assert.ok(plan.includes('junior programer posao Belgrade'))        // every city covered
+  assert.ok(plan.includes('remote junior developer job'))
+  assert.deepEqual(plan.slice(-2), ['junior data engineer állás Szeged', 'junior backend állás Szeged'])  // roles fill
+  assert.equal(new Set(plan).size, plan.length)                      // no duplicates
 })
 
-test('query plan: unknown cities, no cities, no roles', () => {
+test('query plan: roles fill a small plan, unknown cities, no cities, other levels', () => {
   const base = { ...RUN6, remote: false }
-  assert.equal(buildQueryPlan({ ...base, cities: ['Wien'], roles: ['php developer'] })[0], 'junior php developer job Wien')
-  assert.equal(buildQueryPlan({ ...base, countries: ['RS'], cities: ['Sombor'], roles: ['php developer'] })[0],
-    'junior php developer posao Sombor')                                    // one country: its wording
+  assert.deepEqual(buildQueryPlan({ ...base, cities: ['Szeged'], seniority: ['junior'], roles: ['backend'] }),
+    ['junior fejlesztő állás Szeged', 'junior programozó állás Szeged', 'junior backend állás Szeged'])
+  assert.deepEqual(buildQueryPlan({ ...base, cities: ['Wien'], roles: [], seniority: ['mid'] }), ['developer job Wien'])
+  assert.equal(buildQueryPlan({ ...base, countries: ['RS'], cities: ['Sombor'], roles: [], seniority: ['junior'] })[0],
+    'junior programer posao Sombor')                                   // one country: its wording
+  assert.deepEqual(buildQueryPlan({ ...base, cities: ['Szeged'], roles: [], seniority: ['mid'] }),
+    ['fejlesztő állás Szeged', 'programozó állás Szeged'])
   assert.deepEqual(buildQueryPlan({ ...RUN6, cities: [], roles: ['backend', 'frontend'] }),
-    ['remote junior backend job', 'remote junior frontend job'])
-  assert.equal(buildQueryPlan({ ...base, cities: ['Szeged'], roles: [], seniority: ['mid'] })[0], 'developer állás Szeged')
-  assert.ok(buildQueryPlan(RUN6, 3).length <= 3)
+    ['remote junior developer job', 'remote junior backend job', 'remote junior frontend job'])
+  const small = buildQueryPlan(RUN6, 3)
+  assert.equal(small.length, 3)
+  assert.equal(small[2], 'remote junior developer job')               // remote is always kept
 })
 
 test('the jobs prompt lists the plan and asks for every opened posting; our code filters', () => {
   const prompt = buildUserPrompt('jobs', RUN6, {
     skills: {}, seniority: ['junior'], cities: [], languages: {}, preferred_roles: [], dealbreakers: { min_years_required: 3 },
   }, [], '2026-10-30')
-  assert.match(prompt, /1\. junior data engineer állás Szeged/)
+  assert.match(prompt, /\n1\. junior fejlesztő állás Szeged\n/)
   assert.match(prompt, /EVERY posting you opened/)
+  assert.match(prompt, /EVERY posting on\s+the list pages you fetched/)
+  assert.match(prompt, /source "listing", listing_url/)
+  assert.match(prompt, /Do not follow a list's next pages/)
   assert.match(prompt, /do NOT skip such postings yourself/)
   assert.doesNotMatch(prompt, /never report a posting/i)
 })
@@ -425,4 +439,87 @@ test('jobs: a deadline before today is dropped (counted as other); without today
   assert.equal(checked.droppedBy.expired, 1)
   assert.equal(runCounts(checked.candidates, checked.droppedBy).dropped_other, 1)
   assert.equal(validateResults({ results: [old] }, 'jobs').results.length, 1)
+})
+
+// --- listing pages (run 8) -----------------------------------------------------------------------
+
+const LIST_PAGE = 'https://www.profession.hu/allasok/it-programozas-fejlesztes/szeged/1,10'
+const FROM_LIST = {
+  ...GOOD_JOB, title: 'Junior Java fejlesztő', company_name: 'Beta Zrt.', url: 'https://www.profession.hu/allas/junior-java-1234',
+  seniority: 'unknown', years_required: 0, confirmed: false, source: 'listing', listing_url: LIST_PAGE,
+}
+
+test('submit_results has source and listing_url', () => {
+  const item = SUBMIT_RESULTS_TOOL.input_schema.properties.results.items
+  assert.deepEqual(item.properties.source.enum, ['posting', 'listing'])
+  assert.ok(item.required.includes('source') && item.required.includes('listing_url'))
+})
+
+test('a posting from a fetched list page is kept and marked, unknown level and years pass', () => {
+  const rules = rulesFromProfile({ seniority: ['junior'], dealbreakers: { min_years_required: 3 } })
+  const { results, fromListings } = validateResults({ results: [FROM_LIST] }, 'jobs', rules, '2026-10-30', [LIST_PAGE])
+  assert.equal(results.length, 1)
+  assert.equal(fromListings, 1)
+  assert.equal(results[0].reasons[0], LISTING_REASON)
+  assert.equal(results[0].url, 'https://www.profession.hu/allas/junior-java-1234')
+})
+
+test('a listing candidate counts only if its list page was really fetched in this run', () => {
+  const notFetched = validateResults({ results: [FROM_LIST] }, 'jobs', NO_RULES, null, ['https://other.example/list'])
+  assert.equal(notFetched.results.length, 0)
+  assert.equal(notFetched.droppedBy.unconfirmed, 1)
+  const noListUrl = validateResults({ results: [{ ...FROM_LIST, listing_url: '' }] }, 'jobs', NO_RULES, null, null)
+  assert.equal(noListUrl.droppedBy.unconfirmed, 1)
+  // Small differences in how the URL was copied are fine.
+  const copied = validateResults({ results: [FROM_LIST] }, 'jobs', NO_RULES, null, [`${LIST_PAGE.replace('www.', '')}/#top`])
+  assert.equal(copied.results.length, 1)
+})
+
+test('a listing candidate must link to its own posting, not to the list', () => {
+  const { droppedBy } = validateResults({
+    results: [
+      { ...FROM_LIST, url: LIST_PAGE },                                   // the list itself
+      { ...FROM_LIST, title: 'Relative', url: '/allas/junior-java-1234' }, // not an absolute URL
+    ],
+  }, 'jobs', NO_RULES, null, [LIST_PAGE])
+  assert.equal(droppedBy.bad_url, 2)
+})
+
+test('listing candidates still pass the known dealbreakers', () => {
+  const rules = rulesFromProfile({ seniority: ['junior'], dealbreakers: { min_years_required: 3 } })
+  const { droppedBy } = validateResults({
+    results: [
+      { ...FROM_LIST, title: 'Senior Java fejlesztő' },        // the title says senior
+      { ...FROM_LIST, title: 'Java fejlesztő', years_required: 5 },
+    ],
+  }, 'jobs', rules, null, [LIST_PAGE])
+  assert.equal(droppedBy.senior, 1)
+  assert.equal(droppedBy.years, 1)
+})
+
+test('a posting seen both opened and on a list keeps the opened version', () => {
+  const opened = { ...FROM_LIST, source: 'posting', confirmed: true, listing_url: '', score: 70 }
+  const { results, droppedBy } = validateResults({ results: [FROM_LIST, opened] }, 'jobs', NO_RULES, null, [LIST_PAGE])
+  assert.equal(results.length, 1)
+  assert.equal(results[0].reasons.includes(LISTING_REASON), false)
+  assert.equal(droppedBy.duplicate, 1)
+})
+
+test('old submissions without source are treated as opened postings', () => {
+  assert.equal(validateResults({ results: [GOOD_JOB] }, 'jobs', NO_RULES, null, []).results.length, 1)
+})
+
+test('normalizeUrl ignores www, a trailing slash and #fragments, keeps the query', () => {
+  assert.equal(normalizeUrl('https://WWW.Example.com/a/b/#x'), 'https://example.com/a/b')
+  assert.equal(normalizeUrl('https://example.com/?page=2'), 'https://example.com?page=2')
+  assert.equal(normalizeUrl('javascript:alert(1)'), null)
+})
+
+test('per-domain log: fetches and candidates per domain, lists counted separately', () => {
+  const line = domainStats(
+    [LIST_PAGE, 'https://acme.example/jobs/1', 'https://www.profession.hu/allas/x'],
+    { results: [FROM_LIST, { ...FROM_LIST, title: 'Two' }, GOOD_JOB] },
+  )
+  assert.equal(line, 'profession.hu 2 fetches -> 2 candidates (2 from lists), acme.example 1 fetches -> 1 candidates')
+  assert.equal(domainStats([], { results: [] }), '(nothing fetched)')
 })

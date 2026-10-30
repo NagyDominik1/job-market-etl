@@ -154,10 +154,11 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   Supabase before main has the file.
 - Node/npm for the dashboard: versions pinned in package.json, package-lock.json
   committed; Node is not required for the pipeline.
-- AI search confirms job results with Anthropic's web_fetch (single posting pages Claude
-  found by search, max 12 per run, max 1 run per hour, robots.txt respected by the
-  fetcher). Our code fetches nothing; this is on-demand reading of individual postings,
-  not a crawler, so it stays within the "no scraping" rule. The code drops job results
+- AI search confirms job results with Anthropic's web_fetch (single posting pages or one
+  job list page Claude found by search, max 12 per run, never a list's next pages, max 1
+  run per hour, robots.txt respected by the fetcher). Our code fetches nothing; this is
+  on-demand reading of individual pages, not a crawler, so it stays within the "no
+  scraping" rule. The code drops job results
   that aren't confirmed, link to a list/search page (isListingUrl, a heuristic), or hit a
   profile dealbreaker (seniority, min_years_required, title keywords) - the prompt asks
   for the same, the code enforces it.
@@ -185,6 +186,16 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   our code filters (so dropped_* explains every drop; past deadlines count as other); one
   "keep going with the remaining queries" rejection when it submits < 5 candidates while
   time and searches remain (after the "open postings first" one).
+- After run 8 (12 searches, 7 fetches, mostly list pages, 1 candidate): the plan starts with
+  GENERAL local terms per city ("junior fejlesztő/programozó állás", "fejlesztő gyakornok
+  állás", "junior programer / programer praksa posao"), then one remote query, and only
+  then city x role to fill the budget: roles score results, they don't narrow the search.
+  Postings on a fetched list page count as candidates (source "listing", listing_url):
+  the code accepts one only if listing_url is a page fetched in this run (URLs collected
+  from the responses, compared after normalizeUrl) and its url is the posting's own page;
+  seniority/years rules apply only when known. No new column: a "~ seen on a job list
+  page" reason marks them on the tab. The log has one line per run with fetches and
+  candidates per domain (domainStats).
 - linkedin.com is never fetched (its terms forbid automated access): it is in web_fetch's
   blocked_domains (FETCH_BLOCKED_DOMAINS in validate.ts), so LinkedIn is used only through
   search results. A LinkedIn posting counts only if Claude finds and opens the same posting

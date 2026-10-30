@@ -26,7 +26,9 @@ import {
   FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MAX_FETCHES, MAX_SEARCHES, MIN_CANDIDATES, MODEL, type Profile,
   SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool,
 } from './prompt.ts'
-import { type Mode, type SearchParams, rulesFromProfile, runCounts, validateRequest, validateResults } from './validate.ts'
+import {
+  type Mode, type SearchParams, domainStats, rulesFromProfile, runCounts, validateRequest, validateResults,
+} from './validate.ts'
 
 // Supabase kills a function after 150 s (wall clock). Run 4 was killed: its
 // last request had timeout = time left AND one SDK retry, so it could take
@@ -39,8 +41,8 @@ const MAX_REQUESTS = 8 // Claude API requests per run (pause_turn continuations,
 // The message that ends a run early. Claude keeps everything it already found
 // (it is in the conversation), so the confirmed postings are saved, not lost.
 const WRAP_UP_MESSAGE =
-  'Time is up. Do not search or fetch anything else. Call submit_results now with only the ' +
-  'postings you have already opened and confirmed (an empty list if none).'
+  'Time is up. Do not search or fetch anything else. Call submit_results now with the postings ' +
+  'you have already opened and the postings on list pages you already fetched (an empty list if none).'
 
 // The page that calls us is on another origin (localhost / Vercel). '*' is
 // fine here: access is controlled by the Authorization header (a user token),
@@ -82,6 +84,8 @@ interface Usage {
   fetches: number // fetches cost tokens (counted below), no fee
   fetchCalls: number // web_fetch calls seen in the responses, failed ones included
   fetchErrors: string[] // their error codes, e.g. "url_not_accessible"
+  fetchedUrls: string[] // pages fetched successfully: a "listing" result must come from one of them
+  fetchCallUrls: string[] // the URL of every web_fetch call (failed ones too), for the per-domain log
   input: number
   output: number
 }
@@ -101,19 +105,31 @@ function fetchesUsed(usage: Usage): number {
 
 /**
  * Look at one response's blocks (direct tool calls come back in full): count
- * web_fetch calls and their error codes, and return a one-line summary for the
- * log, e.g. "pause_turn: server_tool_use:web_search x3, web_search_tool_result x3".
- * Only block types, tool names and error codes: never page content.
+ * web_fetch calls, their URLs and error codes, and return a one-line summary for
+ * the log, e.g. "pause_turn: server_tool_use:web_search x3, web_search_tool_result x3".
+ * Only block types, tool names, URLs and error codes: never page content.
  */
 function inspectResponse(response: Anthropic.Messages.Message, usage: Usage): string {
   const counts = new Map<string, number>()
+  const requested = new Map<string, string>() // web_fetch tool_use id -> requested URL
   for (const block of response.content as unknown as Array<Record<string, unknown>>) {
     const label = block.type === 'server_tool_use' || block.type === 'tool_use' ? `${block.type}:${block.name}` : String(block.type)
     counts.set(label, (counts.get(label) ?? 0) + 1)
-    if (block.type === 'server_tool_use' && block.name === 'web_fetch') usage.fetchCalls++
-    const content = block.content as { type?: string; error_code?: string } | undefined
+    if (block.type === 'server_tool_use' && block.name === 'web_fetch') {
+      usage.fetchCalls++
+      const url = String((block.input as { url?: unknown } | undefined)?.url ?? '')
+      usage.fetchCallUrls.push(url)
+      requested.set(String(block.id), url)
+    }
+    const content = block.content as { type?: string; error_code?: string; url?: unknown } | undefined
     if (block.type === 'web_fetch_tool_result' && content?.type === 'web_fetch_tool_result_error') {
       usage.fetchErrors.push(content.error_code ?? 'unknown')
+    } else if (block.type === 'web_fetch_tool_result') {
+      // A successful fetch: both the URL Claude asked for and the one the
+      // fetcher read (after redirects) count as "this page was fetched".
+      const asked = requested.get(String(block.tool_use_id))
+      if (asked) usage.fetchedUrls.push(asked)
+      if (typeof content?.url === 'string') usage.fetchedUrls.push(content.url)
     }
   }
   const parts = [...counts].map(([label, n]) => (n > 1 ? `${label} x${n}` : label))
@@ -328,7 +344,9 @@ Deno.serve(async (req: Request) => {
   }
 
   const startedAt = Date.now()
-  const usage: Usage = { searches: 0, fetches: 0, fetchCalls: 0, fetchErrors: [], input: 0, output: 0 }
+  const usage: Usage = {
+    searches: 0, fetches: 0, fetchCalls: 0, fetchErrors: [], fetchedUrls: [], fetchCallUrls: [], input: 0, output: 0,
+  }
   // Close the run. `counts` are the 010 columns (fetches, candidates, drops).
   // If the database doesn't have them yet (migration 010 not applied), save
   // the run without them: a run must never stay 'running' because of that.
@@ -364,8 +382,8 @@ Deno.serve(async (req: Request) => {
 
     // 5. Validate (incl. the profile's dealbreakers) and store.
     // already_applied is set by a database trigger.
-    const { results, candidates, dropped, droppedBy } =
-      validateResults(raw, mode, rulesFromProfile(profile), budapestToday())
+    const { results, candidates, fromListings, dropped, droppedBy } =
+      validateResults(raw, mode, rulesFromProfile(profile), budapestToday(), usage.fetchedUrls)
     const counts = { ...runCounts(candidates, droppedBy), stopped_early: stoppedEarly }
     let stored: unknown[] = []
     if (results.length > 0) {
@@ -377,7 +395,9 @@ Deno.serve(async (req: Request) => {
       stored = (data ?? []).sort((a: { score: number }, b: { score: number }) => b.score - a.score)
     }
     await finish({ status: 'success' }, counts)
-    console.log(`search run ${runId} (${mode}): ${stored.length} results of ${candidates} candidates, ` +
+    console.log(`search run ${runId} domains: ${domainStats(usage.fetchCallUrls, raw)}`)
+    console.log(`search run ${runId} (${mode}): ${stored.length} results (${fromListings} from lists) ` +
+      `of ${candidates} candidates, ` +
       `${dropped} dropped ${JSON.stringify(droppedBy)}, ${usage.searches} searches, ` +
       `${fetchesUsed(usage)} fetches (errors: ${usage.fetchErrors.join(', ') || 'none'}), ` +
       `${usage.input} in / ${usage.output} out tokens, ${Math.round((Date.now() - startedAt) / 1000)} s` +

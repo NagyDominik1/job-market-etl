@@ -204,6 +204,53 @@ export function isFetchBlocked(value: string): boolean {
   }
 }
 
+/**
+ * One form per page, for "was this page fetched?": no #fragment, no trailing
+ * slash, no "www.", lowercase host (the URL class does that). Null if not a URL.
+ * Lenient on purpose: Claude may copy a fetched URL with small differences.
+ */
+export function normalizeUrl(value: unknown): string | null {
+  const text = httpUrl(value)
+  if (!text) return null
+  const url = new URL(text)
+  const host = url.hostname.replace(/^www\./, '')
+  const path = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, '') : ''
+  return `${url.protocol}//${host}${url.port ? `:${url.port}` : ''}${path}${url.search}`
+}
+
+/** The host without "www.", for the per-domain log; '' if not a URL. */
+export function domainOf(value: unknown): string {
+  const text = httpUrl(value)
+  return text ? new URL(text).hostname.replace(/^www\./, '') : ''
+}
+
+/**
+ * Per fetched domain: pages fetched and candidates it gave (a posting counts
+ * for its own url's domain, a listing candidate for its list page's domain).
+ * For the log, e.g. "profession.hu 3 fetches -> 11 candidates (10 from lists)".
+ */
+export function domainStats(fetchedUrls: string[], input: unknown): string {
+  const stats = new Map<string, { fetches: number; candidates: number; fromLists: number }>()
+  const get = (domain: string) => {
+    if (!stats.has(domain)) stats.set(domain, { fetches: 0, candidates: 0, fromLists: 0 })
+    return stats.get(domain)!
+  }
+  for (const url of fetchedUrls) get(domainOf(url) || '(invalid)').fetches++
+  const items = (input as { results?: unknown } | null)?.results
+  for (const raw of Array.isArray(items) ? items : []) {
+    const item = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+    const fromList = item.source === 'listing'
+    const entry = get(domainOf(fromList ? item.listing_url : item.url) || '(no url)')
+    entry.candidates++
+    if (fromList) entry.fromLists++
+  }
+  return [...stats]
+    .sort((a, b) => b[1].candidates - a[1].candidates || b[1].fetches - a[1].fetches)
+    .map(([domain, s]) => `${domain} ${s.fetches} fetches -> ${s.candidates} candidates` +
+      (s.fromLists ? ` (${s.fromLists} from lists)` : ''))
+    .join(', ') || '(nothing fetched)'
+}
+
 // --- profile rules for job results -------------------------------------------------------
 
 /** The dealbreakers the code enforces itself (the prompt asks for them too). */
@@ -279,7 +326,7 @@ export interface DroppedBy {
   duplicate: number
   over_limit: number
   expired: number // jobs: the stated deadline is before today
-  unconfirmed: number // jobs: Claude did not (or could not: blocked domain) open the posting page
+  unconfirmed: number // jobs: posting not opened (or blocked domain); listing: list page not fetched
   bad_url: number // jobs: no URL, or a search/category/careers-index URL
   senior: number // jobs: a level the profile doesn't want (field or title word)
   years: number // jobs: requires min_years_required years or more
@@ -299,35 +346,53 @@ export function runCounts(candidates: number, droppedBy: DroppedBy) {
   }
 }
 
+/** Shown in the reasons of a result taken from a list page (no extra column needed). */
+export const LISTING_REASON = '~ seen on a job list page, the posting itself was not opened'
+
 /**
  * Turn the submit_results tool input into rows we can store. Invalid items are
  * dropped (and counted), never "fixed up": a result without a company or with
- * a score outside 0-100 is not trustworthy. Job results must also be confirmed
- * from the posting itself, link to that posting, pass the profile rules, and
- * not have a deadline before `today` (YYYY-MM-DD; null = don't check).
+ * a score outside 0-100 is not trustworthy. Job results must also be confirmed,
+ * link to one posting, pass the profile rules, and not have a deadline before
+ * `today` (YYYY-MM-DD; null = don't check).
+ *
+ * Confirmed means one of two things (run 8: 7 fetches, mostly list pages, gave
+ * 1 candidate, because only opened postings counted):
+ *  - source "posting": Claude opened this exact url (confirmed: true)
+ *  - source "listing": the posting was on a list page Claude fetched; its
+ *    listing_url must be one of `fetchedUrls` (the pages really fetched in
+ *    this run; null = don't check). Its url must still be the posting's own page.
+ * Postings are processed before listings, so a posting seen both ways keeps the
+ * opened version. Seniority/years rules only apply when known ("unknown", 0 pass).
  */
 export function validateResults(
   input: unknown,
   mode: Mode,
   rules: ResultRules = NO_RULES,
   today: string | null = null,
-): { results: SearchResult[]; candidates: number; dropped: number; droppedBy: DroppedBy } {
+  fetchedUrls: string[] | null = null,
+): { results: SearchResult[]; candidates: number; fromListings: number; dropped: number; droppedBy: DroppedBy } {
   const droppedBy: DroppedBy = {
     invalid: 0, duplicate: 0, over_limit: 0, expired: 0, unconfirmed: 0, bad_url: 0, senior: 0, years: 0,
     dealbreaker: 0,
   }
   const results: SearchResult[] = []
   let candidates = 0
+  let fromListings = 0
   const done = () => {
     results.sort((a, b) => b.score - a.score)
     const dropped = Object.values(droppedBy).reduce((sum, n) => sum + n, 0)
-    return { results, candidates, dropped, droppedBy }
+    return { results, candidates, fromListings, dropped, droppedBy }
   }
 
   const items = (input as { results?: unknown } | null)?.results
   if (!Array.isArray(items)) return done()
   const seen = new Set<string>()
+  const fetched = fetchedUrls === null ? null : new Set(fetchedUrls.map(normalizeUrl).filter((u) => u !== null))
+  const isListing = (raw: unknown) => (raw as { source?: unknown } | null)?.source === 'listing'
+  // Stable sort: postings first, each group in Claude's order.
   const considered = items.slice(0, MAX_RESULTS * 2)
+    .sort((a, b) => Number(isListing(a)) - Number(isListing(b)))
   candidates = considered.length
 
   for (const raw of considered) {
@@ -353,12 +418,18 @@ export function validateResults(
     seen.add(key)
 
     const url = httpUrl(item.url)
+    const listing = mode === 'jobs' && item.source === 'listing'
     if (mode === 'jobs') {
-      if (item.confirmed !== true || (url !== null && isFetchBlocked(url))) {
+      const listingUrl = normalizeUrl(item.listing_url)
+      const confirmed = listing
+        ? listingUrl !== null && (fetched === null || fetched.has(listingUrl))
+        : item.confirmed === true
+      if (!confirmed || (url !== null && isFetchBlocked(url))) {
         droppedBy.unconfirmed++
         continue
       }
-      if (url === null || isListingUrl(url)) {
+      // A listing candidate must point to its own posting, not back to the list.
+      if (url === null || isListingUrl(url) || (listing && normalizeUrl(url) === listingUrl)) {
         droppedBy.bad_url++
         continue
       }
@@ -378,6 +449,8 @@ export function validateResults(
       continue
     }
 
+    const reasons = stringList(item.reasons, 6, 200) ?? []
+    if (listing) fromListings++
     results.push({
       kind: mode === 'jobs' ? 'job' : 'company',
       title: title || null,
@@ -387,7 +460,7 @@ export function validateResults(
       url,
       deadline: mode === 'jobs' ? isoDate(item.deadline) : null,
       contact: mode === 'companies' ? contact(item.contact) : null,
-      reasons: stringList(item.reasons, 6, 200) ?? [],
+      reasons: listing ? [LISTING_REASON, ...reasons].slice(0, 6) : reasons,
       score: score as number,
     })
   }

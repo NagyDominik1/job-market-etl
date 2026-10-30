@@ -9,7 +9,7 @@ export const MODEL = 'claude-haiku-5-5'
 // 15 + 20 was killed). 12 + 12 since run 7 (8 + 8 took 44 s of 95 s); the
 // 55 s wrap-up still ends a slow run in time.
 export const MAX_SEARCHES = 12 // web searches per run ($10 per 1000)
-export const MAX_FETCHES = 12 // posting pages opened per run (no extra fee, only tokens)
+export const MAX_FETCHES = 12 // pages opened per run, postings or lists (no extra fee, only tokens)
 const FETCH_MAX_TOKENS = 8000 // per page: a posting fits, a huge page is cut
 
 /** The search_profile row (migration 007); every field may be empty. */
@@ -69,9 +69,21 @@ export const SUBMIT_RESULTS_TOOL = {
               type: 'boolean',
               description: 'Jobs: true only if you opened this exact url with web_fetch and it is the posting itself. Companies: false',
             },
+            // Run 8: most fetched pages were job lists. A posting listed on a
+            // fetched list page counts too; our code checks listing_url was fetched.
+            source: {
+              type: 'string',
+              enum: ['posting', 'listing'],
+              description: 'Jobs: "posting" = you opened the posting page itself; "listing" = you saw it on a job list ' +
+                'page you fetched. Companies: "posting"',
+            },
+            listing_url: {
+              type: 'string',
+              description: 'source "listing": the URL of the list page you fetched, exactly as fetched; else empty string',
+            },
           },
           required: ['title', 'company_name', 'city', 'remote', 'url', 'deadline', 'contact', 'reasons', 'score',
-            'seniority', 'years_required', 'confirmed'],
+            'seniority', 'years_required', 'confirmed', 'source', 'listing_url'],
           additionalProperties: false,
         },
       },
@@ -165,42 +177,84 @@ function levelWord(seniority: string[]): string {
   return ''
 }
 
-/** One search query for a role in a city, in the city's language. */
-function cityQuery(level: string, role: string, city: string, countries: string[]): string {
-  const country = CITY_COUNTRY[city.toLowerCase()] ?? (countries.length === 1 ? countries[0] : '')
+// General job words per country and level (run 8: role x city queries like
+// "junior data engineer posao Subotica" found almost nothing; local job sites
+// file juniors under "fejlesztő/programozó", "programer"). The roles are used
+// for scoring, and only for extra queries when budget is left.
+const GENERAL_TERMS: Record<'HU' | 'RS' | 'EN', { junior: string[]; intern: string[]; other: string[] }> = {
+  HU: { junior: ['junior fejlesztő', 'junior programozó'], intern: ['fejlesztő gyakornok'], other: ['fejlesztő', 'programozó'] },
+  RS: { junior: ['junior programer'], intern: ['programer praksa'], other: ['programer'] },
+  EN: { junior: ['junior developer'], intern: ['developer internship'], other: ['developer'] },
+}
+
+/** The country whose wording a city's queries use ('' = English). */
+function cityCountry(city: string, countries: string[]): string {
+  return CITY_COUNTRY[city.toLowerCase()] ?? (countries.length === 1 ? countries[0] : '')
+}
+
+/** The general terms for one country and the wanted levels. */
+function generalTerms(country: string, seniority: string[]): string[] {
+  const terms = GENERAL_TERMS[country === 'HU' || country === 'RS' ? country : 'EN']
+  const wanted = [
+    ...(seniority.includes('junior') ? terms.junior : []),
+    ...(seniority.includes('intern') ? terms.intern : []),
+  ]
+  return wanted.length ? wanted : terms.other
+}
+
+/** "<what> állás|posao|job <city>", in the city's language. */
+function cityQuery(what: string, city: string, countries: string[]): string {
+  const country = cityCountry(city, countries)
   const job = country === 'HU' ? 'állás' : country === 'RS' ? 'posao' : 'job'
-  return [level, role, job, city].filter(Boolean).join(' ')
+  return [what, job, city].filter(Boolean).join(' ')
+}
+
+/** Items ranked by list position + priority (stable: equal ranks keep city order). */
+function rankedPairs<T>(cities: string[], itemsFor: (city: string) => T[], query: (item: T, city: string) => string): string[] {
+  const pairs: Array<{ rank: number; query: string }> = []
+  cities.forEach((city, c) => {
+    itemsFor(city).forEach((item, i) => pairs.push({ rank: c + i, query: query(item, city) }))
+  })
+  return pairs.sort((a, b) => a.rank - b.rank).map((pair) => pair.query)
 }
 
 /**
- * The searches to run, in order (run 6: left alone, the model ran 3 of 8
- * searches and gave up). City x role pairs, best first: pairs are ordered by
- * city priority + role priority, so the top city with the top role comes
- * first and both lists get covered. One slot is kept for a remote query when
- * remote is wanted. Never more than `max` (the search budget).
+ * The searches to run, in order (run 6: left alone, the model gave up early;
+ * run 8: role x city queries were too narrow). Three tiers:
+ *  1. per city, general local terms ("junior fejlesztő állás Szeged",
+ *     "junior programer posao Subotica"): city priority + term order, so the
+ *     top city comes first and every city gets its first term early
+ *  2. one remote query when remote is wanted (always kept)
+ *  3. only if budget is left: city x role ("junior backend állás Szeged")
+ * Never more than `max` (the search budget).
  */
 export function buildQueryPlan(params: SearchParams, max = MAX_SEARCHES): string[] {
   const level = levelWord(params.seniority)
-  const roles = params.roles.length ? params.roles : ['developer']
-  const remoteQuery = ['remote', level, roles[0], 'job'].filter(Boolean).join(' ')
-  const citySlots = params.remote && params.cities.length ? max - 1 : max
+  const remoteQueries = params.remote
+    ? [['remote', level, 'developer job'].filter(Boolean).join(' ')]
+    : []
+  const general = rankedPairs(
+    params.cities,
+    (city) => generalTerms(cityCountry(city, params.countries), params.seniority),
+    (term, city) => cityQuery(term, city, params.countries),
+  )
+  const byRole = rankedPairs(
+    params.cities,
+    () => params.roles,
+    (role, city) => cityQuery([level, role].filter(Boolean).join(' '), city, params.countries),
+  )
+  // No cities: remote queries per role fill the rest of the budget.
+  const remoteByRole = params.remote && !params.cities.length
+    ? params.roles.map((role) => ['remote', level, role, 'job'].filter(Boolean).join(' '))
+    : []
 
-  const pairs: Array<{ rank: number; query: string }> = []
-  params.cities.forEach((city, c) => {
-    roles.forEach((role, r) => pairs.push({ rank: c + r, query: cityQuery(level, role, city, params.countries) }))
-  })
-  // Stable sort: equal ranks keep city order (the more wanted city first).
-  const plan = pairs.sort((a, b) => a.rank - b.rank).map((pair) => pair.query)
-  const unique = [...new Set(plan)].slice(0, citySlots)
-
-  if (params.remote) {
-    // No cities: remote queries for each role; with cities: one remote query.
-    const remote = params.cities.length
-      ? [remoteQuery]
-      : roles.map((role) => ['remote', level, role, 'job'].filter(Boolean).join(' '))
-    unique.push(...remote)
+  const plan = [...new Set(general)].slice(0, max - remoteQueries.length)
+  plan.push(...remoteQueries)
+  for (const query of [...byRole, ...remoteByRole]) {
+    if (plan.length >= max) break
+    if (!plan.includes(query)) plan.push(query)
   }
-  return [...new Set(unique)].slice(0, max)
+  return plan
 }
 
 /** The jobs task, with the query plan as a numbered list. */
@@ -213,22 +267,31 @@ list; skip a line only when time runs out.
 ${plan.map((query, i) => `${i + 1}. ${query}`).join('\n')}
 
 How to work:
-1. After each search, pick the result links that are single job postings (not lists). Prefer
-   the employer's site, its ATS page, or the local job sites (Hungary: profession.hu; Serbia:
-   helloworld.rs, poslovi.infostud.com, joberty.com).
-2. Open candidate postings with web_fetch (up to ${MAX_FETCHES} pages in total) and read title,
-   company, city, seniority, years of experience and deadline FROM THE POSTING ITSELF.
+1. After each search, pick the useful result links: single job postings AND job list pages of
+   job sites (a list shows many postings for one fetch). Prefer the employer's site, its ATS
+   page, or the local job sites (Hungary: profession.hu; Serbia: helloworld.rs,
+   poslovi.infostud.com, joberty.com).
+2. Open them with web_fetch (up to ${MAX_FETCHES} pages in total). On a posting page read title,
+   company, city, seniority, years of experience and deadline FROM THE POSTING ITSELF. On a
+   list page read every posting it lists. Do not follow a list's next pages.
    Never fetch ${FETCH_BLOCKED_DOMAINS.join(', ')} (blocked; its terms forbid automated access). A posting
    seen there counts only if you find and open the same posting elsewhere; report that url.
-3. Call submit_results ONCE, at the end, with EVERY posting you opened (confirmed: true), even
-   ones that look like a poor fit (senior, many years, wrong city): our code filters them, so
-   fill seniority and years_required exactly as the posting states. Add promising postings you
-   could not open with confirmed: false. The url must be the single posting page, never a
-   search-results page, a category/list page or a careers index.
+3. Call submit_results ONCE, at the end, with EVERY posting you opened and EVERY posting on
+   the list pages you fetched, even ones that look like a poor fit (senior, many years, wrong
+   city): our code filters them.
+   - Posting page you opened: source "posting", confirmed: true, listing_url "". Fill
+     seniority and years_required exactly as the posting states.
+   - Posting seen on a fetched list page: source "listing", listing_url = that list page's URL
+     exactly as you fetched it, confirmed: false, url = the posting's OWN link from the list
+     (absolute https URL, not the list page). Title, company and city as the list shows them;
+     seniority "unknown" and years_required 0 unless the list states them.
+   - Promising postings seen only in search results: source "posting", confirmed: false.
+   The url must be the single posting page, never a search-results page, a category/list page
+   or a careers index.
 4. Leave out only postings that are clearly closed or expired.
 
-Required order: web_search -> web_fetch -> submit_results. A result you did not open is
-thrown away, so open postings before you submit.
+Required order: web_search -> web_fetch -> submit_results. A result that was neither opened
+nor on a list page you fetched is thrown away, so open postings or lists before you submit.
 
 Score 0-100: skills match 40 (more matched skills at higher levels = more), seniority fit 25,
 city 20 (by the priority order; remote counts if wanted), role fit 15 (a preferred role in
