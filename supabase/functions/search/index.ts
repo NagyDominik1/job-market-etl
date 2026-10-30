@@ -191,7 +191,7 @@ async function askClaude(
           max_tokens: 16000,
           // medium effort: at low, run 6 ran 3 of 8 searches and 2 of 8 fetches and
           // gave up after 15 s. Medium works through the plan; the time budget
-          // still ends every run within 95 s. Thinking stays adaptive (default).
+          // still ends every chunk within 60 s. Thinking stays adaptive (default).
           output_config: { effort: 'medium' },
           system: SYSTEM_PROMPT,
           tools: [webSearchTool(Math.max(searchesLeft, 1)), webFetchTool(Math.max(fetchesLeft, 1)), SUBMIT_RESULTS_TOOL],
