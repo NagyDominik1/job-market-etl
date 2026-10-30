@@ -175,6 +175,13 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   senior / years / dealbreaker / bad_url / other, stopped_early. The Keresés tab shows them
   and explains a run with 0 results. The function saves the run without them if 010 is
   missing, so a run never stays 'running' because the code is ahead of the database.
+- Search agent shape (after run 6: 3 of 8 searches, 2 of 8 fetches, 0 candidates, 15 s):
+  effort medium; the query plan is built in code (buildQueryPlan: city x role, best pairs
+  first, Hungarian "állás" / Serbian "posao" wording by city, one remote query, max 8) and
+  given to the model as a numbered list; the model submits EVERY posting it opened and only
+  our code filters (so dropped_* explains every drop; past deadlines count as other); one
+  "keep going with the remaining queries" rejection when it submits < 5 candidates while
+  time and searches remain (after the "open postings first" one).
 - linkedin.com is never fetched (its terms forbid automated access): it is in web_fetch's
   blocked_domains (FETCH_BLOCKED_DOMAINS in validate.ts), so LinkedIn is used only through
   search results. A LinkedIn posting counts only if Claude finds and opens the same posting

@@ -9,7 +9,8 @@ import {
   rulesFromProfile, runCounts, validateRequest, validateResults,
 } from './validate.ts'
 import {
-  FETCH_FIRST_MESSAGE, MAX_FETCHES, MAX_SEARCHES, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool,
+  FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MAX_FETCHES, MAX_SEARCHES, MIN_CANDIDATES, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT,
+  buildQueryPlan, buildUserPrompt, webFetchTool, webSearchTool,
 } from './prompt.ts'
 
 const PARAMS = { countries: ['HU'], cities: ['Szeged'], remote: false, roles: [], seniority: [], languages: [] }
@@ -192,8 +193,8 @@ test('web fetch tool: current version, max_uses, page size capped, called direct
 
 test('the jobs prompt requires fetching before submitting', () => {
   const prompt = buildUserPrompt('jobs', PARAMS, null, [], '2026-10-30')
-  assert.match(prompt, /web_search -> web_fetch on the candidate postings -> submit_results/)
-  assert.match(prompt, /Never call submit_results before you have opened postings/)
+  assert.match(prompt, /web_search -> web_fetch -> submit_results/)
+  assert.match(prompt, /open postings before you submit/)
   assert.match(FETCH_FIRST_MESSAGE, /open them with web_fetch/)
 })
 
@@ -370,4 +371,56 @@ test('budgets stay small enough for the ~95 s run limit (run 4 with 15 + 20 was 
   assert.ok(MAX_SEARCHES <= 8, `MAX_SEARCHES ${MAX_SEARCHES}`)
   assert.ok(MAX_FETCHES <= 8, `MAX_FETCHES ${MAX_FETCHES}`)
   assert.match(buildUserPrompt('jobs', PARAMS, null, [], '2026-10-30'), /up to 8/)
+})
+
+// --- query plan and "submit everything" (run 6) -------------------------------------------------
+
+const RUN6 = {
+  countries: ['HU', 'RS'], cities: ['Szeged', 'Subotica', 'Novi Sad', 'Belgrade'], remote: true,
+  roles: ['data engineer', 'backend', 'python developer', 'php developer'], seniority: ['intern', 'junior'], languages: [],
+}
+
+test('query plan: best city x best role first, local wording, one remote query, within the budget', () => {
+  const plan = buildQueryPlan(RUN6)
+  assert.equal(plan.length, MAX_SEARCHES)
+  assert.equal(plan[0], 'junior data engineer állás Szeged')               // top city + top role, Hungarian
+  assert.deepEqual(plan.slice(1, 3).sort(), ['junior backend állás Szeged', 'junior data engineer posao Subotica'])
+  assert.equal(plan[plan.length - 1], 'remote junior data engineer job')  // the slot kept for remote
+  assert.ok(plan.some((q) => q.endsWith('posao Novi Sad')))               // Serbian wording for Serbian cities
+  assert.equal(new Set(plan).size, plan.length)                           // no duplicates
+})
+
+test('query plan: unknown cities, no cities, no roles', () => {
+  const base = { ...RUN6, remote: false }
+  assert.equal(buildQueryPlan({ ...base, cities: ['Wien'], roles: ['php developer'] })[0], 'junior php developer job Wien')
+  assert.equal(buildQueryPlan({ ...base, countries: ['RS'], cities: ['Sombor'], roles: ['php developer'] })[0],
+    'junior php developer posao Sombor')                                    // one country: its wording
+  assert.deepEqual(buildQueryPlan({ ...RUN6, cities: [], roles: ['backend', 'frontend'] }),
+    ['remote junior backend job', 'remote junior frontend job'])
+  assert.equal(buildQueryPlan({ ...base, cities: ['Szeged'], roles: [], seniority: ['mid'] })[0], 'developer állás Szeged')
+  assert.ok(buildQueryPlan(RUN6, 3).length <= 3)
+})
+
+test('the jobs prompt lists the plan and asks for every opened posting; our code filters', () => {
+  const prompt = buildUserPrompt('jobs', RUN6, {
+    skills: {}, seniority: ['junior'], cities: [], languages: {}, preferred_roles: [], dealbreakers: { min_years_required: 3 },
+  }, [], '2026-10-30')
+  assert.match(prompt, /1\. junior data engineer állás Szeged/)
+  assert.match(prompt, /EVERY posting you opened/)
+  assert.match(prompt, /do NOT skip such postings yourself/)
+  assert.doesNotMatch(prompt, /never report a posting/i)
+})
+
+test('the keep-going guard: below MIN_CANDIDATES, with a message that points to the plan', () => {
+  assert.equal(MIN_CANDIDATES, 5)
+  assert.match(KEEP_GOING_MESSAGE, /remaining queries/)
+})
+
+test('jobs: a deadline before today is dropped (counted as other); without today it is kept', () => {
+  const old = { ...GOOD_JOB, title: 'Old', deadline: '2026-10-01' }
+  const checked = validateResults({ results: [old, GOOD_JOB] }, 'jobs', NO_RULES, '2026-10-30')
+  assert.deepEqual(checked.results.map((r) => r.title), ['Junior PHP Developer'])
+  assert.equal(checked.droppedBy.expired, 1)
+  assert.equal(runCounts(checked.candidates, checked.droppedBy).dropped_other, 1)
+  assert.equal(validateResults({ results: [old] }, 'jobs').results.length, 1)
 })

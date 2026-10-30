@@ -124,7 +124,12 @@ function describeProfile(profile: Profile | null): string {
   ].join('\n')
 }
 
-/** The dealbreakers as plain rules (the code checks the same ones, validate.ts). */
+/**
+ * The profile's dealbreakers, for information only: run 6 showed that when the
+ * model filters by itself it submits nothing and we can't see why. Now OUR code
+ * filters (validate.ts) and counts every drop (search_runs.dropped_*); the
+ * model only has to fill seniority / years_required correctly.
+ */
 function describeDealbreakers(profile: Profile): string {
   const d = profile.dealbreakers ?? {}
   const rules: string[] = []
@@ -135,39 +140,99 @@ function describeDealbreakers(profile: Profile): string {
     rules.push(`it requires one of these languages: ${d.required_languages_missing.join(', ')}`)
   }
   return rules.length
-    ? `- Dealbreakers (never report a posting if ANY is true): ${rules.join('; ')}`
-    : '- Dealbreakers: (none)'
+    ? `- Filters applied by our code AFTER you submit (do NOT skip such postings yourself, just fill the ` +
+      `fields honestly): ${rules.join('; ')}`
+    : '- Filters: (none)'
 }
 
-const JOBS_RUBRIC = `Task: find CURRENTLY OPEN job postings that fit the profile and the parameters:
-as many confirmed postings as your fetch budget allows (up to ${MAX_FETCHES}). You have about one
-minute: search a few times, then spend the rest on opening postings.
+// --- query plan ------------------------------------------------------------------------
 
-Required order: web_search -> web_fetch on the candidate postings -> submit_results.
-Never call submit_results before you have opened postings with web_fetch: a result that you
-did not open is thrown away. Submit an empty list only if your searches found no posting
-worth opening.
+// Which country a city is in, for the query wording. Lowercase, accents kept
+// as people type them; unknown cities get English wording. Szabadka/Újvidék
+// are the Hungarian names of Subotica/Novi Sad (both in Serbia).
+const CITY_COUNTRY: Record<string, 'HU' | 'RS'> = {
+  szeged: 'HU', budapest: 'HU', debrecen: 'HU', pécs: 'HU', pecs: 'HU', győr: 'HU', gyor: 'HU',
+  miskolc: 'HU', kecskemét: 'HU', kecskemet: 'HU', 'hódmezővásárhely': 'HU', 'hodmezovasarhely': 'HU',
+  subotica: 'RS', szabadka: 'RS', 'novi sad': 'RS', újvidék: 'RS', ujvidek: 'RS', belgrade: 'RS',
+  beograd: 'RS', belgrád: 'RS', belgrad: 'RS', niš: 'RS', nis: 'RS', zrenjanin: 'RS', kragujevac: 'RS',
+}
+
+/** "junior" / "intern" in the query when that is what I look for; mid/senior: no word. */
+function levelWord(seniority: string[]): string {
+  if (seniority.includes('junior')) return 'junior'
+  if (seniority.includes('intern')) return 'intern'
+  return ''
+}
+
+/** One search query for a role in a city, in the city's language. */
+function cityQuery(level: string, role: string, city: string, countries: string[]): string {
+  const country = CITY_COUNTRY[city.toLowerCase()] ?? (countries.length === 1 ? countries[0] : '')
+  const job = country === 'HU' ? 'állás' : country === 'RS' ? 'posao' : 'job'
+  return [level, role, job, city].filter(Boolean).join(' ')
+}
+
+/**
+ * The searches to run, in order (run 6: left alone, the model ran 3 of 8
+ * searches and gave up). City x role pairs, best first: pairs are ordered by
+ * city priority + role priority, so the top city with the top role comes
+ * first and both lists get covered. One slot is kept for a remote query when
+ * remote is wanted. Never more than `max` (the search budget).
+ */
+export function buildQueryPlan(params: SearchParams, max = MAX_SEARCHES): string[] {
+  const level = levelWord(params.seniority)
+  const roles = params.roles.length ? params.roles : ['developer']
+  const remoteQuery = ['remote', level, roles[0], 'job'].filter(Boolean).join(' ')
+  const citySlots = params.remote && params.cities.length ? max - 1 : max
+
+  const pairs: Array<{ rank: number; query: string }> = []
+  params.cities.forEach((city, c) => {
+    roles.forEach((role, r) => pairs.push({ rank: c + r, query: cityQuery(level, role, city, params.countries) }))
+  })
+  // Stable sort: equal ranks keep city order (the more wanted city first).
+  const plan = pairs.sort((a, b) => a.rank - b.rank).map((pair) => pair.query)
+  const unique = [...new Set(plan)].slice(0, citySlots)
+
+  if (params.remote) {
+    // No cities: remote queries for each role; with cities: one remote query.
+    const remote = params.cities.length
+      ? [remoteQuery]
+      : roles.map((role) => ['remote', level, role, 'job'].filter(Boolean).join(' '))
+    unique.push(...remote)
+  }
+  return [...new Set(unique)].slice(0, max)
+}
+
+/** The jobs task, with the query plan as a numbered list. */
+function jobsTask(plan: string[]): string {
+  return `Task: find CURRENTLY OPEN job postings for the parameters below and report every posting
+you opened.
+
+Query plan: run these web searches in this order, one search per line. Work through the whole
+list; skip a line only when time runs out.
+${plan.map((query, i) => `${i + 1}. ${query}`).join('\n')}
 
 How to work:
-1. Search, up to ${MAX_SEARCHES} searches: combine cities and roles sensibly (e.g. "junior PHP
-   developer Szeged", "PHP programer Subotica"), in the local language too (Hungarian:
-   "fejlesztő", "programozó", "állás"; Serbian: "programer", "posao"). Use the local job sites
-   (Hungary: profession.hu; Serbia: helloworld.rs, poslovi.infostud.com, joberty.com) and
-   company career pages (site: queries help).
-2. Open every candidate posting with web_fetch (up to ${MAX_FETCHES} pages) and read title, company,
-   city, seniority, years of experience and deadline FROM THE POSTING ITSELF.
+1. After each search, pick the result links that are single job postings (not lists). Prefer
+   the employer's site, its ATS page, or the local job sites (Hungary: profession.hu; Serbia:
+   helloworld.rs, poslovi.infostud.com, joberty.com).
+2. Open candidate postings with web_fetch (up to ${MAX_FETCHES} pages in total) and read title,
+   company, city, seniority, years of experience and deadline FROM THE POSTING ITSELF.
    Never fetch ${FETCH_BLOCKED_DOMAINS.join(', ')} (blocked; its terms forbid automated access). A posting
-   seen there in search results counts only if you find and open the same posting on the
-   employer's site or another job site; report that url. Otherwise skip it.
-3. Report only postings you opened and confirmed (confirmed: true). The url must be that
-   single posting page: never a search-results page, a category/list page or a careers index.
-   If you can only find a list page, open it and fetch the individual postings it links to.
-4. Skip postings that are closed, expired, or older than about 6 weeks, and every posting
-   that hits a dealbreaker. Fewer confirmed results are better than unconfirmed ones.
+   seen there counts only if you find and open the same posting elsewhere; report that url.
+3. Call submit_results ONCE, at the end, with EVERY posting you opened (confirmed: true), even
+   ones that look like a poor fit (senior, many years, wrong city): our code filters them, so
+   fill seniority and years_required exactly as the posting states. Add promising postings you
+   could not open with confirmed: false. The url must be the single posting page, never a
+   search-results page, a category/list page or a careers index.
+4. Leave out only postings that are clearly closed or expired.
+
+Required order: web_search -> web_fetch -> submit_results. A result you did not open is
+thrown away, so open postings before you submit.
 
 Score 0-100: skills match 40 (more matched skills at higher levels = more), seniority fit 25,
 city 20 (by the priority order; remote counts if wanted), role fit 15 (a preferred role in
 the title).`
+}
 
 const COMPANIES_RUBRIC = `Task: find IT COMPANIES (software, IT services, product companies with an
 engineering team) in the given cities that are worth an open (unsolicited) application,
@@ -188,7 +253,7 @@ export function buildUserPrompt(
 ): string {
   return [
     `Today is ${today}.`,
-    mode === 'jobs' ? JOBS_RUBRIC : COMPANIES_RUBRIC,
+    mode === 'jobs' ? jobsTask(buildQueryPlan(params)) : COMPANIES_RUBRIC,
     '',
     'Search parameters:',
     `- Countries: ${list(params.countries)}`,
@@ -244,6 +309,15 @@ export function webFetchTool(maxUses: number) {
     allowed_callers: ['direct' as const],
   }
 }
+
+/** Fewer candidates than this, with time and searches left: "keep going" (once). */
+export const MIN_CANDIDATES = 5
+
+/** The tool_result that rejects an early submit_results with too few candidates. */
+export const KEEP_GOING_MESSAGE =
+  'Not accepted yet: you submitted fewer than ' + MIN_CANDIDATES + ' postings and there is still time and ' +
+  'search budget. Keep going with the remaining queries of the query plan, open the postings you find with ' +
+  'web_fetch, then call submit_results again with EVERY posting you opened (our code does the filtering).'
 
 /** The tool_result that rejects a submit_results call made before any fetch. */
 export const FETCH_FIRST_MESSAGE =

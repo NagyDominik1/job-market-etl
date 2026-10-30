@@ -23,8 +23,8 @@
 import Anthropic from 'npm:@anthropic-ai/sdk@1.3.0'
 import { createClient } from 'npm:@supabase/supabase-js@2.118.0'
 import {
-  FETCH_FIRST_MESSAGE, MAX_FETCHES, MAX_SEARCHES, MODEL, type Profile, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT,
-  buildUserPrompt, webFetchTool, webSearchTool,
+  FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MAX_FETCHES, MAX_SEARCHES, MIN_CANDIDATES, MODEL, type Profile,
+  SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool,
 } from './prompt.ts'
 import { type Mode, type SearchParams, rulesFromProfile, runCounts, validateRequest, validateResults } from './validate.ts'
 
@@ -34,7 +34,7 @@ import { type Mode, type SearchParams, rulesFromProfile, runCounts, validateRequ
 const TIME_BUDGET_MS = 95_000 // the whole run, Claude requests included
 const WRAP_UP_AFTER_MS = 55_000 // after this: "stop searching, submit what you confirmed"
 const WRAP_UP_RESERVE_MS = 25_000 // kept free for that last, short request
-const MAX_REQUESTS = 6 // Claude API requests per run (pause_turn continuations + wrap-up)
+const MAX_REQUESTS = 8 // Claude API requests per run (pause_turn continuations, the two guards, wrap-up)
 
 // The message that ends a run early. Claude keeps everything it already found
 // (it is in the conversation), so the confirmed postings are saved, not lost.
@@ -146,6 +146,7 @@ async function askClaude(
   let reminded = false
   let wrappingUp = false
   let fetchFirstSent = false // the "open postings before submitting" rejection is sent once
+  let keepGoingSent = false // the "fewer than MIN_CANDIDATES, keep going" rejection is sent once
   const elapsed = () => Date.now() - startedAt
   const wrapUp = () => {
     wrappingUp = true
@@ -167,9 +168,10 @@ async function askClaude(
         {
           model: MODEL,
           max_tokens: 16000,
-          // low effort: fewer, more consolidated tool calls -> faster and cheaper,
-          // which matters with the time budget. Thinking stays adaptive (default).
-          output_config: { effort: 'low' },
+          // medium effort: at low, run 6 ran 3 of 8 searches and 2 of 8 fetches and
+          // gave up after 15 s. Medium works through the plan; the time budget
+          // still ends every run within 95 s. Thinking stays adaptive (default).
+          output_config: { effort: 'medium' },
           system: SYSTEM_PROMPT,
           tools: [webSearchTool(Math.max(searchesLeft, 1)), webFetchTool(Math.max(fetchesLeft, 1)), SUBMIT_RESULTS_TOOL],
           messages,
@@ -195,19 +197,33 @@ async function askClaude(
     const submit = response.content.find(
       (block): block is Anthropic.Messages.ToolUseBlock => block.type === 'tool_use' && block.name === 'submit_results',
     )
-    // Submitting job results without having opened a single posting (run 5)
-    // means nothing can be confirmed. While there is time and fetch budget,
-    // reject that once: submit_results is our tool, so we answer its call with
-    // an error tool_result and Claude continues (opens postings, submits again).
-    if (submit && mode === 'jobs' && fetchesUsed(usage) === 0 && !fetchFirstSent && !wrappingUp &&
-      elapsed() < WRAP_UP_AFTER_MS) {
-      fetchFirstSent = true
+    // Two guards against giving up early, each used once and only while there
+    // is time (before the wrap-up). submit_results is our tool, so we reject a
+    // call by answering it with an error tool_result; Claude then continues.
+    //  - no posting opened yet (run 5): nothing could be confirmed
+    //  - fewer than MIN_CANDIDATES postings while searches are left (run 6)
+    const reject = (message: string) => {
       messages.push({ role: 'assistant', content: response.content })
       messages.push({
         role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: submit.id, content: FETCH_FIRST_MESSAGE, is_error: true }],
+        content: [{ type: 'tool_result', tool_use_id: submit!.id, content: message, is_error: true }],
       })
-      continue
+    }
+    const canContinue = !wrappingUp && elapsed() < WRAP_UP_AFTER_MS
+    if (submit && mode === 'jobs' && canContinue) {
+      const submitted = (submit.input as { results?: unknown })?.results
+      const candidates = Array.isArray(submitted) ? submitted.length : 0
+      if (fetchesUsed(usage) === 0 && !fetchFirstSent) {
+        fetchFirstSent = true
+        reject(FETCH_FIRST_MESSAGE)
+        continue
+      }
+      if (candidates < MIN_CANDIDATES && MAX_SEARCHES - usage.searches > 0 && !keepGoingSent) {
+        keepGoingSent = true
+        console.log(`search run ${runId}: ${candidates} candidates, ${usage.searches} searches: keep going`)
+        reject(KEEP_GOING_MESSAGE)
+        continue
+      }
     }
     if (submit) return { input: submit.input, stoppedEarly: wrappingUp }
 
@@ -348,7 +364,8 @@ Deno.serve(async (req: Request) => {
 
     // 5. Validate (incl. the profile's dealbreakers) and store.
     // already_applied is set by a database trigger.
-    const { results, candidates, dropped, droppedBy } = validateResults(raw, mode, rulesFromProfile(profile))
+    const { results, candidates, dropped, droppedBy } =
+      validateResults(raw, mode, rulesFromProfile(profile), budapestToday())
     const counts = { ...runCounts(candidates, droppedBy), stopped_early: stoppedEarly }
     let stored: unknown[] = []
     if (results.length > 0) {

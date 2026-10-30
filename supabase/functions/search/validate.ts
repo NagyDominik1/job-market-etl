@@ -278,6 +278,7 @@ export interface DroppedBy {
   invalid: number // no company/title, bad score, not an object
   duplicate: number
   over_limit: number
+  expired: number // jobs: the stated deadline is before today
   unconfirmed: number // jobs: Claude did not (or could not: blocked domain) open the posting page
   bad_url: number // jobs: no URL, or a search/category/careers-index URL
   senior: number // jobs: a level the profile doesn't want (field or title word)
@@ -294,7 +295,7 @@ export function runCounts(candidates: number, droppedBy: DroppedBy) {
     dropped_years: droppedBy.years,
     dropped_dealbreaker: droppedBy.dealbreaker,
     dropped_bad_url: droppedBy.bad_url,
-    dropped_other: droppedBy.invalid + droppedBy.duplicate + droppedBy.over_limit,
+    dropped_other: droppedBy.invalid + droppedBy.duplicate + droppedBy.over_limit + droppedBy.expired,
   }
 }
 
@@ -302,15 +303,18 @@ export function runCounts(candidates: number, droppedBy: DroppedBy) {
  * Turn the submit_results tool input into rows we can store. Invalid items are
  * dropped (and counted), never "fixed up": a result without a company or with
  * a score outside 0-100 is not trustworthy. Job results must also be confirmed
- * from the posting itself, link to that posting, and pass the profile rules.
+ * from the posting itself, link to that posting, pass the profile rules, and
+ * not have a deadline before `today` (YYYY-MM-DD; null = don't check).
  */
 export function validateResults(
   input: unknown,
   mode: Mode,
   rules: ResultRules = NO_RULES,
+  today: string | null = null,
 ): { results: SearchResult[]; candidates: number; dropped: number; droppedBy: DroppedBy } {
   const droppedBy: DroppedBy = {
-    invalid: 0, duplicate: 0, over_limit: 0, unconfirmed: 0, bad_url: 0, senior: 0, years: 0, dealbreaker: 0,
+    invalid: 0, duplicate: 0, over_limit: 0, expired: 0, unconfirmed: 0, bad_url: 0, senior: 0, years: 0,
+    dealbreaker: 0,
   }
   const results: SearchResult[] = []
   let candidates = 0
@@ -361,6 +365,11 @@ export function validateResults(
       const broken = dealbreaker({ title, seniority: item.seniority, years_required: item.years_required }, rules)
       if (broken) {
         droppedBy[broken.kind === 'keyword' ? 'dealbreaker' : broken.kind]++
+        continue
+      }
+      const deadline = isoDate(item.deadline)
+      if (today !== null && deadline !== null && deadline < today) { // YYYY-MM-DD compares as text
+        droppedBy.expired++
         continue
       }
     }
