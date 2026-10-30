@@ -237,42 +237,65 @@ const TITLE_LEVEL_WORDS: Record<string, RegExp> = {
   lead: /(?<![\p{L}\p{N}])(lead|vezető|vezeto)(?![\p{L}\p{N}])/iu,
 }
 
-/** Why a job result breaks a profile rule, or null when it is fine. */
+/** Which profile rule a job result breaks (counted separately per kind). */
+export interface Dealbreaker {
+  kind: 'senior' | 'years' | 'keyword'
+  reason: string
+}
+
+/** Which profile rule a job result breaks, or null when it is fine. */
 export function dealbreaker(
   item: { title: string; seniority: unknown; years_required: unknown },
   rules: ResultRules,
-): string | null {
+): Dealbreaker | null {
   const allowed = rules.allowedSeniority
   if (allowed.length > 0) {
     const level = typeof item.seniority === 'string' ? item.seniority.toLowerCase() : 'unknown'
     if (level !== 'unknown' && (SENIORITIES as readonly string[]).includes(level) && !allowed.includes(level)) {
-      return `seniority ${level}`
+      return { kind: 'senior', reason: `seniority ${level}` }
     }
     for (const [titleLevel, pattern] of Object.entries(TITLE_LEVEL_WORDS)) {
-      if (!allowed.includes(titleLevel) && pattern.test(item.title)) return `${titleLevel} in the title`
+      if (!allowed.includes(titleLevel) && pattern.test(item.title)) {
+        return { kind: 'senior', reason: `${titleLevel} in the title` }
+      }
     }
   }
   const years = item.years_required
   if (rules.minYearsRequired !== null && typeof years === 'number' && years >= rules.minYearsRequired) {
-    return `requires ${years} years`
+    return { kind: 'years', reason: `requires ${years} years` }
   }
   const title = item.title.toLowerCase()
   const keyword = rules.titleKeywords.find((word) => title.includes(word))
-  return keyword ? `title contains "${keyword}"` : null
+  return keyword ? { kind: 'keyword', reason: `title contains "${keyword}"` } : null
 }
 
 // --- Claude's results --------------------------------------------------------------------
 
 export const MAX_RESULTS = 30
 
-/** Why results were dropped, counted per reason (logged and returned to the page). */
+/** Why results were dropped, counted per reason (stored in search_runs, 010). */
 export interface DroppedBy {
   invalid: number // no company/title, bad score, not an object
   duplicate: number
   over_limit: number
   unconfirmed: number // jobs: Claude did not (or could not: blocked domain) open the posting page
-  listing_url: number // jobs: no URL, or a search/category/careers-index URL
-  dealbreaker: number // jobs: seniority, years or title keyword from the profile
+  bad_url: number // jobs: no URL, or a search/category/careers-index URL
+  senior: number // jobs: a level the profile doesn't want (field or title word)
+  years: number // jobs: requires min_years_required years or more
+  dealbreaker: number // jobs: a dealbreaker title keyword
+}
+
+/** The search_runs columns (migration 010) for one run's counts. */
+export function runCounts(candidates: number, droppedBy: DroppedBy) {
+  return {
+    candidates,
+    dropped_unconfirmed: droppedBy.unconfirmed,
+    dropped_senior: droppedBy.senior,
+    dropped_years: droppedBy.years,
+    dropped_dealbreaker: droppedBy.dealbreaker,
+    dropped_bad_url: droppedBy.bad_url,
+    dropped_other: droppedBy.invalid + droppedBy.duplicate + droppedBy.over_limit,
+  }
 }
 
 /**
@@ -285,20 +308,25 @@ export function validateResults(
   input: unknown,
   mode: Mode,
   rules: ResultRules = NO_RULES,
-): { results: SearchResult[]; dropped: number; droppedBy: DroppedBy } {
-  const droppedBy: DroppedBy = { invalid: 0, duplicate: 0, over_limit: 0, unconfirmed: 0, listing_url: 0, dealbreaker: 0 }
+): { results: SearchResult[]; candidates: number; dropped: number; droppedBy: DroppedBy } {
+  const droppedBy: DroppedBy = {
+    invalid: 0, duplicate: 0, over_limit: 0, unconfirmed: 0, bad_url: 0, senior: 0, years: 0, dealbreaker: 0,
+  }
   const results: SearchResult[] = []
+  let candidates = 0
   const done = () => {
     results.sort((a, b) => b.score - a.score)
     const dropped = Object.values(droppedBy).reduce((sum, n) => sum + n, 0)
-    return { results, dropped, droppedBy }
+    return { results, candidates, dropped, droppedBy }
   }
 
   const items = (input as { results?: unknown } | null)?.results
   if (!Array.isArray(items)) return done()
   const seen = new Set<string>()
+  const considered = items.slice(0, MAX_RESULTS * 2)
+  candidates = considered.length
 
-  for (const raw of items.slice(0, MAX_RESULTS * 2)) {
+  for (const raw of considered) {
     const item = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
     const companyName = cleanText(item.company_name, 200)
     const title = mode === 'jobs' ? cleanText(item.title, 200) : ''
@@ -327,11 +355,12 @@ export function validateResults(
         continue
       }
       if (url === null || isListingUrl(url)) {
-        droppedBy.listing_url++
+        droppedBy.bad_url++
         continue
       }
-      if (dealbreaker({ title, seniority: item.seniority, years_required: item.years_required }, rules)) {
-        droppedBy.dealbreaker++
+      const broken = dealbreaker({ title, seniority: item.seniority, years_required: item.years_required }, rules)
+      if (broken) {
+        droppedBy[broken.kind === 'keyword' ? 'dealbreaker' : broken.kind]++
         continue
       }
     }

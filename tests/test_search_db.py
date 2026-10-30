@@ -95,6 +95,22 @@ def test_a_recent_running_run_still_counts(conn):
     assert conn.execute("SELECT status FROM search_runs WHERE id = %s", (first,)).fetchone() == ("running",)
 
 
+def test_run_counts_have_defaults_and_reject_negative_values(conn):
+    # 010: a new run starts with zero counts and candidates NULL (no answer yet).
+    run_id, _ = start_run(conn)
+    row = conn.execute(
+        "SELECT fetches_used, candidates, dropped_unconfirmed, dropped_senior, dropped_years, "
+        "dropped_dealbreaker, dropped_bad_url, dropped_other, stopped_early FROM search_runs WHERE id = %s",
+        (run_id,),
+    ).fetchone()
+    assert row == (0, None, 0, 0, 0, 0, 0, 0, False)
+    conn.execute(
+        "UPDATE search_runs SET fetches_used = 5, candidates = 7, dropped_unconfirmed = 2, "
+        "dropped_senior = 1, stopped_early = true WHERE id = %s", (run_id,))
+    with pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute("UPDATE search_runs SET dropped_years = -1 WHERE id = %s", (run_id,))
+
+
 def test_a_successful_run_still_counts(conn):
     first, _ = start_run(conn)
     conn.execute("UPDATE search_runs SET status = 'success', input_tokens = 5000 WHERE id = %s", (first,))

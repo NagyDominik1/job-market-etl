@@ -6,9 +6,11 @@ import assert from 'node:assert/strict'
 
 import {
   FETCH_BLOCKED_DOMAINS, MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker, httpUrl, isFetchBlocked, isListingUrl, isoDate,
-  rulesFromProfile, validateRequest, validateResults,
+  rulesFromProfile, runCounts, validateRequest, validateResults,
 } from './validate.ts'
-import { MAX_FETCHES, MAX_SEARCHES, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool } from './prompt.ts'
+import {
+  FETCH_FIRST_MESSAGE, MAX_FETCHES, MAX_SEARCHES, SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool,
+} from './prompt.ts'
 
 const PARAMS = { countries: ['HU'], cities: ['Szeged'], remote: false, roles: [], seniority: [], languages: [] }
 
@@ -166,23 +168,33 @@ test('submit_results is strict and every object forbids extra fields', () => {
   assert.deepEqual([...item.required].sort(), Object.keys(item.properties).sort())   // strict needs all required
 })
 
-test('web search tool: current version, max_uses, results excluded', () => {
+test('web search tool: current version, max_uses, called directly (no dynamic filtering)', () => {
   const tool = webSearchTool(15)
   assert.equal(tool.type, 'web_search_20260318')
   assert.equal(tool.max_uses, 15)
-  assert.equal(tool.response_inclusion, 'excluded')
+  assert.deepEqual(tool.allowed_callers, ['direct'])
 })
 
 test('web search tool has no user_location (the API rejected "HU" with a 400)', () => {
   assert.equal('user_location' in webSearchTool(15), false)
 })
 
-test('web fetch tool: current version, max_uses, page size capped, results excluded', () => {
+test('web fetch tool: current version, max_uses, page size capped, called directly', () => {
+  // Run 5: with the default (code execution only) Claude searched and never
+  // fetched. Direct calls are the documented search -> fetch flow.
   const tool = webFetchTool(MAX_FETCHES)
   assert.equal(tool.type, 'web_fetch_20260318')
   assert.equal(tool.max_uses, MAX_FETCHES)
   assert.ok(tool.max_content_tokens > 0 && tool.max_content_tokens <= 10_000)
-  assert.equal(tool.response_inclusion, 'excluded')
+  assert.deepEqual(tool.allowed_callers, ['direct'])
+  assert.equal('response_inclusion' in tool, false)  // only matters for code execution
+})
+
+test('the jobs prompt requires fetching before submitting', () => {
+  const prompt = buildUserPrompt('jobs', PARAMS, null, [], '2026-10-30')
+  assert.match(prompt, /web_search -> web_fetch on the candidate postings -> submit_results/)
+  assert.match(prompt, /Never call submit_results before you have opened postings/)
+  assert.match(FETCH_FIRST_MESSAGE, /open them with web_fetch/)
 })
 
 // --- posting URLs ----------------------------------------------------------------------------
@@ -232,7 +244,7 @@ test('jobs: unconfirmed results and results without a posting URL are dropped', 
   }, 'jobs')
   assert.deepEqual(results.map((r) => r.title), ['Junior PHP Developer'])
   assert.equal(droppedBy.unconfirmed, 1)
-  assert.equal(droppedBy.listing_url, 3)
+  assert.equal(droppedBy.bad_url, 3)
 })
 
 test('companies: a careers index is the expected url, no confirmation needed', () => {
@@ -259,17 +271,17 @@ test('rules come from the profile; a missing profile means no rules', () => {
 test('senior/lead postings and 3+ years are dealbreakers, junior/mid with 0-2 years are fine', () => {
   const job = (title: string, seniority = 'unknown', years = 0) => ({ title, seniority, years_required: years })
   for (const bad of [
-    job('PHP Developer', 'senior'),
-    job('Senior PHP Developer'),            // the title says it, seniority field unknown
-    job('Szenior PHP fejlesztő'),
-    job('Sr. Backend Developer'),
-    job('Tech Lead (PHP)'),
-    job('Vezető fejlesztő'),
-    job('PHP Developer', 'mid', 3),         // exactly the limit counts
-    job('PHP Developer', 'junior', 5),
-    job('Director of Engineering'),         // title keyword
-  ]) {
-    assert.notEqual(dealbreaker(bad, RULES), null, bad.title)
+    [job('PHP Developer', 'senior'), 'senior'],
+    [job('Senior PHP Developer'), 'senior'],            // the title says it, seniority field unknown
+    [job('Szenior PHP fejlesztő'), 'senior'],
+    [job('Sr. Backend Developer'), 'senior'],
+    [job('Tech Lead (PHP)'), 'senior'],                 // lead counts as "senior" (above the profile)
+    [job('Vezető fejlesztő'), 'senior'],
+    [job('PHP Developer', 'mid', 3), 'years'],          // exactly the limit counts
+    [job('PHP Developer', 'junior', 5), 'years'],
+    [job('Director of Engineering'), 'keyword'],        // title keyword
+  ] as const) {
+    assert.equal(dealbreaker(bad[0], RULES)?.kind, bad[1], bad[0].title)
   }
   for (const ok of [
     job('Junior PHP Developer', 'junior', 0),
@@ -285,8 +297,42 @@ test('validateResults applies the dealbreakers to jobs only', () => {
   const senior = { ...GOOD_JOB, title: 'Senior PHP Developer', seniority: 'senior', years_required: 5 }
   const jobs = validateResults({ results: [senior, GOOD_JOB] }, 'jobs', RULES)
   assert.deepEqual(jobs.results.map((r) => r.title), ['Junior PHP Developer'])
-  assert.equal(jobs.droppedBy.dealbreaker, 1)
+  assert.equal(jobs.droppedBy.senior, 1)
   assert.equal(validateResults({ results: [senior] }, 'companies', RULES).results.length, 1)
+})
+
+// --- per-run counts (search_runs, migration 010) ------------------------------------------------
+
+test('every dropped result is counted under one reason, candidates = what Claude submitted', () => {
+  const { results, candidates, dropped, droppedBy } = validateResults({
+    results: [
+      GOOD_JOB,
+      { ...GOOD_JOB, title: 'Not opened', confirmed: false },                  // unconfirmed
+      { ...GOOD_JOB, title: 'List', url: 'https://acme.example/careers' },     // bad url
+      { ...GOOD_JOB, title: 'Senior PHP Developer' },                          // senior
+      { ...GOOD_JOB, title: 'PHP Developer', years_required: 4 },              // years
+      { ...GOOD_JOB, title: 'Director of Engineering' },                       // keyword (director)
+      { ...GOOD_JOB, company_name: '' },                                       // invalid
+      GOOD_JOB,                                                                // duplicate
+    ],
+  }, 'jobs', RULES)
+  assert.equal(results.length, 1)
+  assert.equal(candidates, 8)
+  assert.equal(dropped, 7)
+  assert.deepEqual(runCounts(candidates, droppedBy), {
+    candidates: 8,
+    dropped_unconfirmed: 1,
+    dropped_senior: 1,
+    dropped_years: 1,
+    dropped_dealbreaker: 1,
+    dropped_bad_url: 1,
+    dropped_other: 2,
+  })
+})
+
+test('an empty submission is 0 candidates, not a drop (run 5)', () => {
+  const { candidates, dropped } = validateResults({ results: [] }, 'jobs', RULES)
+  assert.deepEqual([candidates, dropped], [0, 0])
 })
 
 // --- blocked domains (LinkedIn) ------------------------------------------------------------------

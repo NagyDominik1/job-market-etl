@@ -140,8 +140,13 @@ function describeDealbreakers(profile: Profile): string {
 }
 
 const JOBS_RUBRIC = `Task: find CURRENTLY OPEN job postings that fit the profile and the parameters:
-as many confirmed postings as your fetch budget allows (up to ${MAX_FETCHES}). Time is short (about
-one minute), so work fast and pick the most promising candidates.
+as many confirmed postings as your fetch budget allows (up to ${MAX_FETCHES}). You have about one
+minute: search a few times, then spend the rest on opening postings.
+
+Required order: web_search -> web_fetch on the candidate postings -> submit_results.
+Never call submit_results before you have opened postings with web_fetch: a result that you
+did not open is thrown away. Submit an empty list only if your searches found no posting
+worth opening.
 
 How to work:
 1. Search, up to ${MAX_SEARCHES} searches: combine cities and roles sensibly (e.g. "junior PHP
@@ -199,6 +204,15 @@ export function buildUserPrompt(
   ].join('\n')
 }
 
+// allowed_callers ["direct"] on both web tools: Claude calls them itself, not
+// from inside code execution ("dynamic filtering", the default since the
+// _20260209 versions). Run 5 (dynamic filtering) searched 6 times, fetched
+// nothing and submitted nothing. Direct calls are the documented search ->
+// fetch flow: search result URLs are plainly in the conversation (web_fetch
+// may only open URLs from earlier search/fetch results, not from code output),
+// and every search/fetch result and error comes back to us, so we can count it.
+// Cost: raw results enter the context (more input tokens); Haiku makes that cheap.
+
 /**
  * The web search tool. No user_location: the API rejects some country codes
  * (run 1: "Country code HU is not supported." -> 400), and the countries and
@@ -209,10 +223,7 @@ export function webSearchTool(maxUses: number) {
     type: 'web_search_20260318' as const,
     name: 'web_search' as const,
     max_uses: maxUses,
-    // The raw search results are filtered by code inside the API (dynamic
-    // filtering); "excluded" = don't send them back to us, only Claude's
-    // answer. We never show raw web content, so this saves tokens.
-    response_inclusion: 'excluded' as const,
+    allowed_callers: ['direct' as const],
   }
 }
 
@@ -230,7 +241,12 @@ export function webFetchTool(maxUses: number) {
     max_uses: maxUses,
     max_content_tokens: FETCH_MAX_TOKENS,
     blocked_domains: [...FETCH_BLOCKED_DOMAINS],
-    // Same as for search: don't echo the raw page text back to us.
-    response_inclusion: 'excluded' as const,
+    allowed_callers: ['direct' as const],
   }
 }
+
+/** The tool_result that rejects a submit_results call made before any fetch. */
+export const FETCH_FIRST_MESSAGE =
+  'Not accepted: you have not opened any posting with web_fetch yet, so nothing can be confirmed. ' +
+  'Pick the most promising posting URLs from your search results, open them with web_fetch, ' +
+  'then call submit_results again with the postings you confirmed.'

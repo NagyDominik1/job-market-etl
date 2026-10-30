@@ -77,6 +77,44 @@ async function describeFunctionError(error) {
   return `A keresés nem sikerült (HTTP ${status}). Próbáld újra pár perc múlva.`
 }
 
+// Per-run counts (search_runs, migration 010): from the function's response
+// right after a search, or from the run row. null when the run has none (older
+// runs, or 010 not applied yet).
+function countsOf(run, fromResponse) {
+  if (fromResponse) return fromResponse
+  if (run && typeof run.fetches_used === 'number' && run.candidates !== null && run.candidates !== undefined) return run
+  return null
+}
+
+const DROP_LABELS = [
+  ['dropped_unconfirmed', 'nem ellenőrzött (nem nyitotta meg)'],
+  ['dropped_senior', 'senior / lead szint'],
+  ['dropped_years', 'túl sok év tapasztalat'],
+  ['dropped_dealbreaker', 'kizáró szó a címben'],
+  ['dropped_bad_url', 'lista- vagy keresőoldal link'],
+  ['dropped_other', 'hibás vagy duplikált'],
+]
+
+function countsLine(counts) {
+  const drops = DROP_LABELS.filter(([key]) => counts[key] > 0).map(([key, label]) => `${counts[key]} ${label}`)
+  return `Jelöltek: ${counts.candidates} · megnyitott hirdetés: ${counts.fetches_used}` +
+    (drops.length ? ` · kiszűrve: ${drops.join(', ')}` : '')
+}
+
+// Why a successful job search ended with 0 results, in one sentence.
+function emptyReason(counts) {
+  if (!counts) return 'Nincs találat.'
+  if (counts.candidates === 0 && counts.fetches_used === 0) {
+    return 'Nincs találat: a keresések nem hoztak megnyitható hirdetést, így Claude egyet sem nyitott meg. ' +
+      'Próbáld más városokkal, kevesebb vagy általánosabb szerepkörrel.'
+  }
+  if (counts.candidates === 0) {
+    return `Nincs találat: Claude ${counts.fetches_used} hirdetést megnyitott, de egyik sem felelt meg a feltételeidnek.`
+  }
+  const [key, label] = DROP_LABELS.reduce((best, item) => (counts[item[0]] > counts[best[0]] ? item : best))
+  return `Nincs találat: mind a ${counts.candidates} jelöltet kiszűrtük; a leggyakoribb ok: ${label} (${counts[key]}).`
+}
+
 // The last run's status line: success, still running, or why it failed.
 function runOutcome(run, resultCount) {
   if (run.status === 'success') return `${resultCount} találat`
@@ -146,6 +184,7 @@ export default function SearchTab({ session }) {
   const [seconds, setSeconds] = useState(0)
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null) // e.g. "stopped early, the list may be incomplete"
+  const [responseCounts, setResponseCounts] = useState(null) // counts from the last search's response
 
   // On open: fill the form from search_profile, and show the last search.
   useEffect(() => {
@@ -193,6 +232,7 @@ export default function SearchTab({ session }) {
     setLoading(true)
     setError(null)
     setNotice(null)
+    setResponseCounts(null)
     const params = {
       countries: splitList(countries),
       cities: splitList(cities),
@@ -211,6 +251,7 @@ export default function SearchTab({ session }) {
       setRun(runs?.[0] ?? null)
     } else {
       setResults(data.results)
+      setResponseCounts(data.counts ?? null)
       if (data.stopped_early) {
         setNotice('Időkorlát miatt a keresés korábban leállt: az eddig ellenőrzött találatok mentve, a lista hiányos lehet.')
       }
@@ -286,6 +327,13 @@ export default function SearchTab({ session }) {
           {run.searches_used} webes keresés, {run.input_tokens + run.output_tokens} token · kb. $
           {estimateCost(run).toFixed(3)}
         </p>
+      )}
+
+      {run && !loading && run.mode === 'jobs' && countsOf(run, responseCounts) && (
+        <p className="status">{countsLine(countsOf(run, responseCounts))}</p>
+      )}
+      {run && !loading && run.mode === 'jobs' && run.status === 'success' && results.length === 0 && (
+        <p className="status notice">{emptyReason(countsOf(run, responseCounts))}</p>
       )}
 
       <div className="cards">

@@ -165,6 +165,16 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   saved instead of lost; the response says stopped_early. A killed run can't close its
   row, so start_search_run() (009) marks runs 'running' for > 5 min as 'error' (timeout);
   'error' runs never count toward the 1-per-hour limit (008).
+- Search web tools are called directly (allowed_callers ["direct"]), not via dynamic
+  filtering (code execution, the default since the _20260209 versions): run 5 searched 6
+  times with dynamic filtering, never fetched and submitted nothing. Direct calls are the
+  documented search -> fetch flow and every result/error comes back, so it can be counted.
+  The function also rejects one submit_results made before any web_fetch (an error
+  tool_result: "open the postings first").
+- Per-run counts in search_runs (010): fetches_used, candidates, dropped_unconfirmed /
+  senior / years / dealbreaker / bad_url / other, stopped_early. The Keresés tab shows them
+  and explains a run with 0 results. The function saves the run without them if 010 is
+  missing, so a run never stays 'running' because the code is ahead of the database.
 - linkedin.com is never fetched (its terms forbid automated access): it is in web_fetch's
   blocked_domains (FETCH_BLOCKED_DOMAINS in validate.ts), so LinkedIn is used only through
   search results. A LinkedIn posting counts only if Claude finds and opens the same posting
