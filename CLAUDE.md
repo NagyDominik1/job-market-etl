@@ -279,8 +279,7 @@ id in search_runs.error. Migration 008: failed runs (status error) never count t
 1-per-hour limit (applied to Supabase by the next pipeline run).
 Localhost magic-link login still redirects to Vercel (emailRedirectTo now ends in "/";
 check the Supabase email template and Redirect URLs).
-Phase 9.4 on branch phase-9-4-tracker-ui (not merged yet): migration 011 applied to
-Supabase, 012 (revoke EXECUTE on the trigger function) waiting for the next pipeline run;
+Phase 9.4 merged into main (2026-10-30): migrations 011 + 012 applied to Supabase;
 Jelentkezéseim tab; search budget 12 searches + 12 fetches (function version 9).
 Next: 9.5 (draft-letter).
 Open phases: 4 (Gmail IMAP), 5 (ATS), 6 (report).
