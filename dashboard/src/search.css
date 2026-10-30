@@ -60,3 +60,26 @@
 .status.notice {
   color: var(--mid);
 }
+
+/* Progress per chunk (city / remote) while a search runs. */
+.chunk-progress {
+  margin: 0 1rem 1rem;
+  padding-left: 1.3rem;
+  font-size: 0.9rem;
+}
+
+.chunk.waiting {
+  color: var(--muted);
+}
+
+.chunk.running {
+  color: var(--accent);
+}
+
+.chunk.done {
+  color: var(--plus);
+}
+
+.chunk.error {
+  color: var(--minus);
+}

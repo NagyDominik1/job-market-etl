@@ -11,6 +11,9 @@
 //     checked, cut to a maximum length, and links must be http(s). Job results
 //     must also link to one posting (not a list) and pass the profile's
 //     dealbreakers: the code enforces them, the prompt alone is not enough.
+//     The score and reasons are computed here too (score.ts), never by Claude.
+
+import { EMPTY_CONTEXT, type ScoringContext, scoreCompany, scoreJob } from './score.ts'
 
 export const MODES = ['jobs', 'companies'] as const
 export type Mode = (typeof MODES)[number]
@@ -143,6 +146,33 @@ export function validateRequest(body: unknown): Ok<{ mode: Mode; params: SearchP
       },
     },
   }
+}
+
+/** One request to the function: start a run, or run one of its chunks (run 9). */
+export type Action =
+  | { action: 'start'; mode: Mode; params: SearchParams }
+  | { action: 'chunk'; runId: number; chunk: number }
+
+/**
+ * {action: "start", mode, params} or {action: "chunk", run_id, chunk}. A body
+ * without action is a start (the dashboard before chunks). A chunk call
+ * carries no params: the function reads them from the run row, so the
+ * browser can't change what a chunk searches.
+ */
+export function validateAction(body: unknown): Ok<Action> | Err {
+  if (typeof body !== 'object' || body === null) return { ok: false, error: 'The body must be a JSON object' }
+  const { action } = body as { action?: unknown }
+  if (action === 'chunk') {
+    const { run_id: runId, chunk } = body as { run_id?: unknown; chunk?: unknown }
+    if (!Number.isSafeInteger(runId) || (runId as number) <= 0) return { ok: false, error: 'run_id must be a positive integer' }
+    if (!Number.isSafeInteger(chunk) || (chunk as number) < 0 || (chunk as number) > 100) {
+      return { ok: false, error: 'chunk must be an integer from 0' }
+    }
+    return { ok: true, value: { action: 'chunk', runId: runId as number, chunk: chunk as number } }
+  }
+  if (action !== undefined && action !== 'start') return { ok: false, error: 'action must be "start" or "chunk"' }
+  const request = validateRequest(body)
+  return request.ok ? { ok: true, value: { action: 'start', ...request.value } } : request
 }
 
 // --- posting URLs ------------------------------------------------------------------------
@@ -319,12 +349,14 @@ export function dealbreaker(
 // --- Claude's results --------------------------------------------------------------------
 
 export const MAX_RESULTS = 30
+/** Postings taken from one list page at most (keeps the model's answer short). */
+export const MAX_PER_LISTING = 10
 
 /** Why results were dropped, counted per reason (stored in search_runs, 010). */
 export interface DroppedBy {
   invalid: number // no company/title, bad score, not an object
   duplicate: number
-  over_limit: number
+  over_limit: number // over MAX_RESULTS, or over MAX_PER_LISTING from one list page
   expired: number // jobs: the stated deadline is before today
   unconfirmed: number // jobs: posting not opened (or blocked domain); listing: list page not fetched
   bad_url: number // jobs: no URL, or a search/category/careers-index URL
@@ -351,8 +383,8 @@ export const LISTING_REASON = '~ seen on a job list page, the posting itself was
 
 /**
  * Turn the submit_results tool input into rows we can store. Invalid items are
- * dropped (and counted), never "fixed up": a result without a company or with
- * a score outside 0-100 is not trustworthy. Job results must also be confirmed,
+ * dropped (and counted), never "fixed up": a result without a company (or a
+ * job without a title) is not trustworthy. Job results must also be confirmed,
  * link to one posting, pass the profile rules, and not have a deadline before
  * `today` (YYYY-MM-DD; null = don't check).
  *
@@ -364,6 +396,8 @@ export const LISTING_REASON = '~ seen on a job list page, the posting itself was
  *    this run; null = don't check). Its url must still be the posting's own page.
  * Postings are processed before listings, so a posting seen both ways keeps the
  * opened version. Seniority/years rules only apply when known ("unknown", 0 pass).
+ * Score and reasons come from score.ts with `scoring` (my profile + the run's
+ * cities and roles), so the model only reports facts.
  */
 export function validateResults(
   input: unknown,
@@ -371,6 +405,7 @@ export function validateResults(
   rules: ResultRules = NO_RULES,
   today: string | null = null,
   fetchedUrls: string[] | null = null,
+  scoring: ScoringContext = EMPTY_CONTEXT,
 ): { results: SearchResult[]; candidates: number; fromListings: number; dropped: number; droppedBy: DroppedBy } {
   const droppedBy: DroppedBy = {
     invalid: 0, duplicate: 0, over_limit: 0, expired: 0, unconfirmed: 0, bad_url: 0, senior: 0, years: 0,
@@ -388,6 +423,7 @@ export function validateResults(
   const items = (input as { results?: unknown } | null)?.results
   if (!Array.isArray(items)) return done()
   const seen = new Set<string>()
+  const perListing = new Map<string, number>()
   const fetched = fetchedUrls === null ? null : new Set(fetchedUrls.map(normalizeUrl).filter((u) => u !== null))
   const isListing = (raw: unknown) => (raw as { source?: unknown } | null)?.source === 'listing'
   // Stable sort: postings first, each group in Claude's order.
@@ -399,11 +435,7 @@ export function validateResults(
     const item = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
     const companyName = cleanText(item.company_name, 200)
     const title = mode === 'jobs' ? cleanText(item.title, 200) : ''
-    const score = item.score
-    const valid =
-      companyName !== '' &&
-      (mode === 'companies' || title !== '') &&
-      typeof score === 'number' && Number.isInteger(score) && score >= 0 && score <= 100
+    const valid = companyName !== '' && (mode === 'companies' || title !== '')
     if (!valid) {
       droppedBy.invalid++
       continue
@@ -443,25 +475,40 @@ export function validateResults(
         droppedBy.expired++
         continue
       }
+      if (listing) {
+        const taken = perListing.get(listingUrl!) ?? 0
+        if (taken >= MAX_PER_LISTING) {
+          droppedBy.over_limit++
+          continue
+        }
+        perListing.set(listingUrl!, taken + 1)
+      }
     }
     if (results.length >= MAX_RESULTS) {
       droppedBy.over_limit++
       continue
     }
 
-    const reasons = stringList(item.reasons, 6, 200) ?? []
+    const city = cleanText(item.city, 100)
+    const remote = typeof item.remote === 'boolean' ? item.remote : null
+    const skills = stringList(item.skills, 8, 40) ?? []
+    const careersContact = mode === 'companies' ? contact(item.contact) : null
+    const { score, reasons } = mode === 'jobs'
+      ? scoreJob({ title, city, remote: remote === true, seniority: cleanText(item.seniority, 10).toLowerCase(), skills }, scoring)
+      : scoreCompany({ city, remote: remote === true, skills, juniorFriendly: item.junior_friendly === true,
+        hasContact: careersContact !== null }, scoring)
     if (listing) fromListings++
     results.push({
       kind: mode === 'jobs' ? 'job' : 'company',
       title: title || null,
       company_name: companyName,
-      city: cleanText(item.city, 100) || null,
-      remote: typeof item.remote === 'boolean' ? item.remote : null,
+      city: city || null,
+      remote,
       url,
       deadline: mode === 'jobs' ? isoDate(item.deadline) : null,
-      contact: mode === 'companies' ? contact(item.contact) : null,
-      reasons: listing ? [LISTING_REASON, ...reasons].slice(0, 6) : reasons,
-      score: score as number,
+      contact: careersContact,
+      reasons: (listing ? [LISTING_REASON, ...reasons] : reasons).slice(0, 8),
+      score,
     })
   }
   return done()

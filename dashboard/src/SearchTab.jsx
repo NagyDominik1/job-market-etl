@@ -7,6 +7,9 @@ import './search.css'
 // The "Keresés" tab (Phase 9.3): starts the Edge Function "search" and shows
 // its results. The browser never talks to Claude: it only calls our function
 // (with my login token) and reads search_runs / search_results (read-only).
+// A search runs in chunks (run 9): one call starts the run, then one call per
+// city (plus remote), one after another, with progress per chunk. A failed
+// chunk doesn't stop the others, and the finished chunks' results stay.
 
 const SENIORITIES = ['intern', 'junior', 'mid', 'senior', 'lead']
 
@@ -113,6 +116,18 @@ function emptyReason(counts) {
   return `Nincs találat: mind a ${counts.candidates} jelöltet kiszűrtük; a leggyakoribb ok: ${label} (${counts[key]}).`
 }
 
+const CHUNK_STATUS = {
+  waiting: 'vár',
+  running: 'fut…',
+}
+
+// "Szeged: kész, 4 találat" / "Subotica: hiba (…)"
+function chunkLine(chunk) {
+  if (chunk.status === 'done') return `kész, ${chunk.count} találat${chunk.stoppedEarly ? ' (időkorlát miatt hiányos)' : ''}`
+  if (chunk.status === 'error') return `hiba: ${chunk.message}`
+  return CHUNK_STATUS[chunk.status]
+}
+
 // The last run's status line: success, still running, or why it failed.
 function runOutcome(run, resultCount) {
   if (run.status === 'success') return `${resultCount} találat`
@@ -192,6 +207,7 @@ export default function SearchTab({ session }) {
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null) // e.g. "stopped early, the list may be incomplete"
   const [responseCounts, setResponseCounts] = useState(null) // counts from the last search's response
+  const [chunks, setChunks] = useState([]) // [{label, status, count, message}] of the current search
 
   // On open: fill the form from search_profile, and show the last search.
   useEffect(() => {
@@ -222,7 +238,7 @@ export default function SearchTab({ session }) {
     load()
   }, [])
 
-  // A visible clock while waiting: a search takes 30-120 seconds.
+  // A visible clock while waiting: about a minute per chunk.
   useEffect(() => {
     if (!loading) return
     setSeconds(0)
@@ -234,12 +250,23 @@ export default function SearchTab({ session }) {
     setSeniority((current) => (current.includes(level) ? current.filter((l) => l !== level) : [...current, level]))
   }
 
+  // The run's row and its stored results (also shows the already_applied badge).
+  async function reloadRun(runId) {
+    const [{ data: runs }, { data: rows }] = await Promise.all([
+      supabase.from('search_runs').select('*').eq('id', runId),
+      supabase.from('search_results').select('*').eq('run_id', runId).order('score', { ascending: false }),
+    ])
+    setRun(runs?.[0] ?? null)
+    setResults(rows ?? [])
+  }
+
   async function runSearch(event) {
     event.preventDefault()
     setLoading(true)
     setError(null)
     setNotice(null)
     setResponseCounts(null)
+    setChunks([])
     const params = {
       countries: splitList(countries),
       cities: splitList(cities),
@@ -249,22 +276,49 @@ export default function SearchTab({ session }) {
       languages: splitList(languages),
     }
     // invoke() sends my login token automatically (Authorization header).
-    const { data, error } = await supabase.functions.invoke('search', { body: { mode, params } })
+    // 1. Start the run: the rate limit is checked here, once per run.
+    const { data: started, error } = await supabase.functions.invoke('search', { body: { action: 'start', mode, params } })
     if (error) {
       setError(await describeFunctionError(error))
       setResults([])
       // Show the failed run's row too (its stored reason), if it has one.
       const { data: runs } = await supabase.from('search_runs').select('*').order('started_at', { ascending: false }).limit(1)
       setRun(runs?.[0] ?? null)
-    } else {
-      setResults(data.results)
-      setResponseCounts(data.counts ?? null)
-      if (data.stopped_early) {
-        setNotice('Időkorlát miatt a keresés korábban leállt: az eddig ellenőrzött találatok mentve, a lista hiányos lehet.')
-      }
-      const { data: runs } = await supabase.from('search_runs').select('*').eq('id', data.run_id)
-      setRun(runs?.[0] ?? null)
+      setLoading(false)
+      return
     }
+
+    // 2. The chunks, one after another. Results appear as each chunk finishes;
+    // a failed chunk is shown and the next one still runs.
+    let progress = started.chunks.map((label) => ({ label, status: 'waiting' }))
+    const update = (index, fields) => {
+      progress = progress.map((chunk, i) => (i === index ? { ...chunk, ...fields } : chunk))
+      setChunks(progress)
+    }
+    setChunks(progress)
+    setResults([])
+    let found = []
+    for (let index = 0; index < progress.length; index++) {
+      update(index, { status: 'running' })
+      const { data, error: chunkError } = await supabase.functions.invoke('search', {
+        body: { action: 'chunk', run_id: started.run_id, chunk: index },
+      })
+      if (chunkError) {
+        const message = await describeFunctionError(chunkError)
+        // The run-level timeout text ("doesn't count, retry later") is wrong for one chunk.
+        update(index, { status: 'error', message: message === TIMEOUT_MESSAGE ? 'időtúllépés' : message })
+        continue
+      }
+      found = [...found, ...data.results].sort((a, b) => b.score - a.score)
+      setResults(found)
+      update(index, { status: 'done', count: data.results.length, stoppedEarly: data.stopped_early })
+    }
+    if (progress.some((chunk) => chunk.stoppedEarly)) {
+      setNotice('Egyes városoknál időkorlát miatt korábban leállt a keresés: az eddig talált hirdetések mentve, a lista hiányos lehet.')
+    }
+
+    // 3. The run's totals (added up chunk by chunk in search_runs) and the stored results.
+    await reloadRun(started.run_id)
     setLoading(false)
   }
 
@@ -321,8 +375,21 @@ export default function SearchTab({ session }) {
         <button type="submit" disabled={loading}>
           {loading ? `Keresés… ${seconds} s` : 'Keresés indítása'}
         </button>
-        <span className="hint">Óránként egy keresés; legfeljebb 12 webes keresés (~$0.12) és kb. 1,5 perc.</span>
+        <span className="hint">
+          Óránként egy keresés. Városonként egy rész (max. 6, a remote is egy), részenként legfeljebb 4 webes
+          keresés (~$0.04) és kb. 1 perc.
+        </span>
       </form>
+
+      {chunks.length > 0 && (
+        <ol className="chunk-progress" aria-label="Haladás városonként">
+          {chunks.map((chunk) => (
+            <li key={chunk.label} className={`chunk ${chunk.status}`}>
+              <strong>{chunk.label}</strong>: {chunkLine(chunk)}
+            </li>
+          ))}
+        </ol>
+      )}
 
       {error && <p className="status error" role="alert">{error}</p>}
       {notice && <p className="status notice">{notice}</p>}

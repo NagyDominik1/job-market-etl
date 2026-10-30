@@ -4,12 +4,12 @@
 import { FETCH_BLOCKED_DOMAINS, type Mode, type SearchParams } from './validate.ts'
 
 export const MODEL = 'claude-haiku-5-5'
-// Budgets per run. Small on purpose: every search or fetch takes seconds, and
-// a run must finish in ~95 s (Supabase kills the function at 150 s; run 4 with
-// 15 + 20 was killed). 12 + 12 since run 7 (8 + 8 took 44 s of 95 s); the
-// 55 s wrap-up still ends a slow run in time.
-export const MAX_SEARCHES = 12 // web searches per run ($10 per 1000)
-export const MAX_FETCHES = 12 // pages opened per run, postings or lists (no extra fee, only tokens)
+// Budgets per CHUNK (run 9: one long request per run timed out; now one
+// function call per city, plus remote, each with its own small budget and a
+// 60 s limit). A run has at most MAX_CHUNKS chunks, so at most 24 searches.
+export const MAX_SEARCHES = 4 // web searches per chunk ($10 per 1000)
+export const MAX_FETCHES = 4 // pages opened per chunk, postings or lists (no extra fee, only tokens)
+export const MAX_CHUNKS = 6
 const FETCH_MAX_TOKENS = 8000 // per page: a posting fits, a huge page is cut
 
 /** The search_profile row (migration 007); every field may be empty. */
@@ -27,11 +27,13 @@ export interface Profile {
 // We still validate it (validateResults): the schema can't check that a URL is
 // http(s) or that a score is 0-100 (strict mode doesn't support those rules).
 // Empty string = unknown (simpler for the model than optional fields).
+// Facts only, short (run 9): no score or reasons, our code computes them
+// (score.ts), which keeps the answer small and the request short.
 export const SUBMIT_RESULTS_TOOL = {
   name: 'submit_results',
   description:
-    'Submit the final, ranked search results. Call this exactly once, at the end, after searching. ' +
-    'Use an empty string for any unknown text field.',
+    'Submit the postings (or companies) you found. Call this exactly once, at the end. Facts only, ' +
+    'short values; use an empty string for any unknown text field.',
   strict: true,
   input_schema: {
     type: 'object' as const,
@@ -48,14 +50,17 @@ export const SUBMIT_RESULTS_TOOL = {
             url: { type: 'string', description: 'Link to the posting (jobs) or the company careers page (companies)' },
             deadline: { type: 'string', description: 'Application deadline as YYYY-MM-DD, or empty string' },
             contact: { type: 'string', description: 'Companies mode: public careers e-mail or careers page URL; else empty' },
-            reasons: {
+            skills: {
               type: 'array',
               items: { type: 'string' },
-              description: '2-5 short reasons for the score, e.g. "+ PHP and MySQL in the stack", "- Budapest only"',
+              description: 'Up to 8 technology names the posting (or company stack) mentions, e.g. "PHP"; [] if none shown',
             },
-            score: { type: 'integer', description: 'Fit with the profile, 0-100' },
-            // The next three let the code check the dealbreakers itself
-            // (validate.ts); they are not stored.
+            junior_friendly: {
+              type: 'boolean',
+              description: 'Companies: internships, junior roles or an academy program are mentioned. Jobs: false',
+            },
+            // The next fields let the code check the dealbreakers and compute
+            // the score itself (validate.ts, score.ts); they are not stored.
             seniority: {
               type: 'string',
               enum: ['intern', 'junior', 'mid', 'senior', 'lead', 'unknown'],
@@ -82,8 +87,8 @@ export const SUBMIT_RESULTS_TOOL = {
               description: 'source "listing": the URL of the list page you fetched, exactly as fetched; else empty string',
             },
           },
-          required: ['title', 'company_name', 'city', 'remote', 'url', 'deadline', 'contact', 'reasons', 'score',
-            'seniority', 'years_required', 'confirmed', 'source', 'listing_url'],
+          required: ['title', 'company_name', 'city', 'remote', 'url', 'deadline', 'contact', 'skills',
+            'junior_friendly', 'seniority', 'years_required', 'confirmed', 'source', 'listing_url'],
           additionalProperties: false,
         },
       },
@@ -109,8 +114,7 @@ Rules:
 - Links must be the real http(s) URL of the page you found (prefer the employer's own site
   or its ATS page over aggregators).
 - Do not report companies from the "already applied" list.
-- Score honestly with the rubric given; the reasons must explain the score.
-- Results ordered by score, best first, at most 20.
+- Report facts only, in short values: our code scores the results.
 - Be efficient: plan your searches and fetches, and call submit_results before you run out
   of either.`
 
@@ -257,6 +261,33 @@ export function buildQueryPlan(params: SearchParams, max = MAX_SEARCHES): string
   return plan
 }
 
+/** One part of a run: one city, one country (no cities given), or remote. */
+export interface Chunk {
+  label: string // shown on the dashboard, e.g. "Szeged", "remote"
+  params: SearchParams // the run's params narrowed to this chunk
+}
+
+// A country searched as a whole when no city is given ("junior fejlesztő
+// állás Magyarország"); the name is used as the place in the queries.
+const COUNTRY_NAMES: Record<string, string> = { HU: 'Magyarország', RS: 'Srbija' }
+
+/**
+ * The chunks of a run, in order: one per city (priority order), or one per
+ * country when no city is given, then one for remote. At most MAX_CHUNKS;
+ * the remote chunk is always kept. Deterministic: the function rebuilds the
+ * same list from the stored params for every chunk call.
+ */
+export function buildChunks(params: SearchParams): Chunk[] {
+  const places = params.cities.length
+    ? params.cities.map((city) => ({ label: city, params: { ...params, cities: [city], remote: false } }))
+    : params.countries.map((code) => {
+      const name = COUNTRY_NAMES[code] ?? code
+      return { label: name, params: { ...params, countries: [code], cities: [name], remote: false } }
+    })
+  const remote = params.remote ? [{ label: 'remote', params: { ...params, cities: [], remote: true } }] : []
+  return [...places.slice(0, MAX_CHUNKS - remote.length), ...remote]
+}
+
 /** The jobs task, with the query plan as a numbered list. */
 function jobsTask(plan: string[]): string {
   return `Task: find CURRENTLY OPEN job postings for the parameters below and report every posting
@@ -284,7 +315,8 @@ How to work:
    - Posting seen on a fetched list page: source "listing", listing_url = that list page's URL
      exactly as you fetched it, confirmed: false, url = the posting's OWN link from the list
      (absolute https URL, not the list page). Title, company and city as the list shows them;
-     seniority "unknown" and years_required 0 unless the list states them.
+     seniority "unknown" and years_required 0 unless the list states them. At most 10
+     postings per list page: the ones that best match the search.
    - Promising postings seen only in search results: source "posting", confirmed: false.
    The url must be the single posting page, never a search-results page, a category/list page
    or a careers index.
@@ -292,20 +324,17 @@ How to work:
 
 Required order: web_search -> web_fetch -> submit_results. A result that was neither opened
 nor on a list page you fetched is thrown away, so open postings or lists before you submit.
-
-Score 0-100: skills match 40 (more matched skills at higher levels = more), seniority fit 25,
-city 20 (by the priority order; remote counts if wanted), role fit 15 (a preferred role in
-the title).`
+Keep every value short: the title as written, the company name, the city, up to 8 skills.`
 }
 
 const COMPANIES_RUBRIC = `Task: find IT COMPANIES (software, IT services, product companies with an
 engineering team) in the given cities that are worth an open (unsolicited) application,
-even without a current posting.
-Rank them by: city priority 30 (by the order given), tech-stack match with my skills 30,
-junior-friendliness 20 (internships, junior roles, mentoring, academy programs), a public
-careers contact 20 (a careers page or a careers/HR e-mail on their own site).
+even without a current posting. Report facts only (our code ranks them):
 "url" = the company's careers page (or homepage); "contact" = the careers e-mail or the
-careers page URL. Only use contacts published by the company itself.`
+careers page URL; "skills" = their tech stack (up to 8); "junior_friendly" = true if they
+mention internships, junior roles, mentoring or an academy program. Only use contacts
+published by the company itself. Set source "posting", listing_url "", confirmed false,
+seniority "unknown", years_required 0, deadline "".`
 
 /** The user message for one run. `today` is YYYY-MM-DD (the model has no clock). */
 export function buildUserPrompt(
@@ -374,8 +403,8 @@ export function webFetchTool(maxUses: number) {
   }
 }
 
-/** Fewer candidates than this, with time and searches left: "keep going" (once). */
-export const MIN_CANDIDATES = 5
+/** Fewer candidates than this (per chunk), with time and searches left: "keep going" (once). */
+export const MIN_CANDIDATES = 3
 
 /** The tool_result that rejects an early submit_results with too few candidates. */
 export const KEEP_GOING_MESSAGE =

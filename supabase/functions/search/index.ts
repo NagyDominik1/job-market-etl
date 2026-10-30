@@ -7,15 +7,17 @@
 // reach the browser. It is a Supabase secret, readable only here, server-side.
 // Why not the Python pipeline: the search is started by a click, not daily.
 //
-// What it does, in order:
-//   1. checks the caller is a logged-in user (anon / no token -> 401)
-//   2. validates the request body (validate.ts)
-//   3. rate limit: start_search_run() in the database (max 1 per hour -> 429)
-//   4. asks Claude (claude-haiku-5-5) with web search + web fetch (Claude opens
-//      candidate postings to confirm them); the answer comes back as ONE call
-//      of the submit_results tool (strict JSON)
-//   5. validates every result field and the profile's dealbreakers, stores the
-//      results and the cost
+// A search run is split into chunks (run 9: one long request per run timed
+// out): one per city, plus remote. The dashboard calls this function once to
+// start the run, then once per chunk, one after another:
+//   {action: "start", mode, params} -> rate limit (start_search_run, max 1 run
+//        per hour -> 429), the chunk list -> {run_id, chunks: ["Szeged", ...]}
+//   {action: "chunk", run_id, chunk} -> claim_search_chunk() (each chunk runs
+//        once, in order), one Claude conversation (claude-haiku-5-5, web search
+//        + web fetch, small budget, 60 s), the answer as ONE submit_results
+//        call (strict JSON, facts only), validated, scored by our code
+//        (score.ts), stored; the run's counts add up chunk by chunk
+// Every call first checks the caller is a logged-in user (no token -> 401).
 // The function itself never acts on web content: the searches and page fetches
 // run on Anthropic's side, our code fetches nothing and writes only its own two
 // tables. Web pages can only end up here as validated JSON.
@@ -24,19 +26,22 @@ import Anthropic from 'npm:@anthropic-ai/sdk@1.3.0'
 import { createClient } from 'npm:@supabase/supabase-js@2.118.0'
 import {
   FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MAX_FETCHES, MAX_SEARCHES, MIN_CANDIDATES, MODEL, type Profile,
-  SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildUserPrompt, webFetchTool, webSearchTool,
+  SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildChunks, buildUserPrompt, webFetchTool, webSearchTool,
 } from './prompt.ts'
+import { scoringContext } from './score.ts'
 import {
-  type Mode, type SearchParams, domainStats, rulesFromProfile, runCounts, validateRequest, validateResults,
+  type Mode, type SearchParams, domainStats, rulesFromProfile, runCounts, validateAction, validateRequest,
+  validateResults,
 } from './validate.ts'
 
-// Supabase kills a function after 150 s (wall clock). Run 4 was killed: its
-// last request had timeout = time left AND one SDK retry, so it could take
-// twice as long. Now: no retries, and every run finishes within ~95 s.
-const TIME_BUDGET_MS = 95_000 // the whole run, Claude requests included
-const WRAP_UP_AFTER_MS = 55_000 // after this: "stop searching, submit what you confirmed"
-const WRAP_UP_RESERVE_MS = 25_000 // kept free for that last, short request
-const MAX_REQUESTS = 8 // Claude API requests per run (pause_turn continuations, the two guards, wrap-up)
+// Supabase kills a function after 150 s (wall clock). Run 4 was killed (a
+// timeout retried by the SDK); run 9 timed out in ONE long request, which the
+// wrap-up below can't interrupt. Now: no retries, and each CHUNK (its own
+// function call, a small budget) finishes within 60 s.
+const TIME_BUDGET_MS = 60_000 // one chunk, Claude requests included
+const WRAP_UP_AFTER_MS = 35_000 // after this: "stop searching, submit what you confirmed"
+const WRAP_UP_RESERVE_MS = 15_000 // kept free for that last, short request
+const MAX_REQUESTS = 6 // Claude API requests per chunk (pause_turn continuations, the two guards, wrap-up)
 
 // The message that ends a run early. Claude keeps everything it already found
 // (it is in the conversation), so the confirmed postings are saved, not lost.
@@ -154,7 +159,7 @@ async function askClaude(
   appliedCompanies: string[],
   usage: Usage,
   startedAt: number,
-  runId: number,
+  tag: string, // "run 12 / Szeged", for the log
 ): Promise<{ input: unknown; stoppedEarly: boolean }> {
   const messages: Anthropic.Messages.MessageParam[] = [
     { role: 'user', content: buildUserPrompt(mode, params, profile, appliedCompanies, budapestToday()) },
@@ -208,7 +213,7 @@ async function askClaude(
       throw error
     }
     addUsage(usage, response.usage)
-    console.log(`search run ${runId} request ${request + 1} (${Math.round(elapsed() / 1000)} s): ${inspectResponse(response, usage)}`)
+    console.log(`search ${tag} request ${request + 1} (${Math.round(elapsed() / 1000)} s): ${inspectResponse(response, usage)}`)
 
     const submit = response.content.find(
       (block): block is Anthropic.Messages.ToolUseBlock => block.type === 'tool_use' && block.name === 'submit_results',
@@ -217,7 +222,7 @@ async function askClaude(
     // is time (before the wrap-up). submit_results is our tool, so we reject a
     // call by answering it with an error tool_result; Claude then continues.
     //  - no posting opened yet (run 5): nothing could be confirmed
-    //  - fewer than MIN_CANDIDATES postings while searches are left (run 6)
+    //  - fewer than MIN_CANDIDATES postings while searches are left (run 6; per chunk now)
     const reject = (message: string) => {
       messages.push({ role: 'assistant', content: response.content })
       messages.push({
@@ -236,7 +241,7 @@ async function askClaude(
       }
       if (candidates < MIN_CANDIDATES && MAX_SEARCHES - usage.searches > 0 && !keepGoingSent) {
         keepGoingSent = true
-        console.log(`search run ${runId}: ${candidates} candidates, ${usage.searches} searches: keep going`)
+        console.log(`search ${tag}: ${candidates} candidates, ${usage.searches} searches: keep going`)
         reject(KEEP_GOING_MESSAGE)
         continue
       }
@@ -300,6 +305,145 @@ function describeError(error: unknown): string {
   return 'Unknown error'
 }
 
+type Admin = ReturnType<typeof createClient>
+
+/** {action: "start"}: the rate limit, then the chunk list for the dashboard. */
+async function startRun(admin: Admin, mode: Mode, params: SearchParams): Promise<Response> {
+  const chunks = buildChunks(params)
+  const { data: started, error: startError } = await admin.rpc('start_search_run', { p_mode: mode, p_params: params })
+  if (startError) return json(500, { error: 'Could not start the search run' })
+  const { run_id: runId, next_allowed_at: nextAllowedAt } = started[0]
+  if (runId === null) {
+    const retryAfter = Math.max(1, Math.ceil((new Date(nextAllowedAt).getTime() - Date.now()) / 1000))
+    return json(429, { error: 'One search per hour', next_allowed_at: nextAllowedAt }, { 'Retry-After': String(retryAfter) })
+  }
+  const { error } = await admin.from('search_runs').update({ chunks_total: chunks.length }).eq('id', runId)
+  if (error) {
+    // 013 not applied: close the run (status error never counts) instead of leaving it running.
+    await admin.from('search_runs')
+      .update({ status: 'error', error: 'chunks not supported: is migration 013 applied?', finished_at: new Date().toISOString() })
+      .eq('id', runId)
+    return json(500, { error: 'The database is not ready for chunked searches (migration 013)' })
+  }
+  console.log(`search run ${runId} (${mode}): started, chunks ${chunks.map((c) => c.label).join(', ')}`)
+  return json(200, { run_id: runId, chunks: chunks.map((chunk) => chunk.label) })
+}
+
+/**
+ * Add one chunk's usage and counts to its run (chunks run one after another,
+ * enforced by claim_search_chunk, so read-then-write is safe). The last chunk
+ * closes the run: success if at least one chunk worked, else error.
+ */
+async function recordChunk(
+  admin: Admin,
+  runId: number,
+  index: number,
+  total: number,
+  usage: Usage,
+  counts: Record<string, number | boolean> | null, // null = the chunk failed
+  failure: string | null,
+): Promise<void> {
+  const { data: run } = await admin.from('search_runs').select('*').eq('id', runId).single()
+  if (!run) return
+  const add = (key: string) => (run[key] ?? 0) + Number(counts?.[key] ?? 0)
+  const failed = run.chunks_failed + (counts ? 0 : 1)
+  const last = index === total - 1
+  const fields: Record<string, unknown> = {
+    searches_used: run.searches_used + usage.searches,
+    input_tokens: run.input_tokens + usage.input,
+    output_tokens: run.output_tokens + usage.output,
+    fetches_used: run.fetches_used + fetchesUsed(usage),
+    candidates: add('candidates'),
+    dropped_unconfirmed: add('dropped_unconfirmed'),
+    dropped_senior: add('dropped_senior'),
+    dropped_years: add('dropped_years'),
+    dropped_dealbreaker: add('dropped_dealbreaker'),
+    dropped_bad_url: add('dropped_bad_url'),
+    dropped_other: add('dropped_other'),
+    stopped_early: run.stopped_early || counts?.stopped_early === true,
+    chunks_failed: failed,
+    last_activity_at: new Date().toISOString(),
+    error: failure ? [run.error, failure].filter(Boolean).join('; ').slice(0, 1000) : run.error,
+  }
+  if (last) {
+    fields.status = failed < total ? 'success' : 'error'
+    fields.finished_at = new Date().toISOString()
+  }
+  const { error } = await admin.from('search_runs').update(fields).eq('id', runId)
+  if (error) console.error(`search run ${runId}: could not record chunk ${index} (${error.message})`)
+}
+
+/** {action: "chunk"}: one chunk of a running run. */
+async function runChunk(admin: Admin, anthropicKey: string, runId: number, index: number): Promise<Response> {
+  const { data: claimed, error: claimError } = await admin.rpc('claim_search_chunk', { p_run_id: runId, p_chunk: index })
+  if (claimError) return json(500, { error: 'Could not start this part of the search' })
+  if (!claimed?.length) return json(409, { error: 'This part of the search already ran, or the search is finished' })
+  // The params were validated when the run started; check again (they come back as JSON).
+  const stored = validateRequest({ mode: claimed[0].mode, params: claimed[0].params })
+  const total: number = claimed[0].chunks_total
+  const chunk = stored.ok ? buildChunks(stored.value.params)[index] : undefined
+  const usage: Usage = {
+    searches: 0, fetches: 0, fetchCalls: 0, fetchErrors: [], fetchedUrls: [], fetchCallUrls: [], input: 0, output: 0,
+  }
+  if (!stored.ok || !chunk) {
+    await recordChunk(admin, runId, index, total, usage, null, `chunk ${index}: invalid stored parameters`)
+    return json(500, { error: 'Invalid stored search parameters' })
+  }
+  const { mode, params } = stored.value
+  const tag = `run ${runId} / ${chunk.label}`
+  const startedAt = Date.now()
+
+  try {
+    const [{ data: profile }, { data: applied }] = await Promise.all([
+      admin.from('search_profile').select('skills, seniority, cities, languages, preferred_roles, dealbreakers').maybeSingle(),
+      admin.from('applications').select('company_name').limit(500),
+    ])
+    const appliedCompanies = [...new Set((applied ?? []).map((row: { company_name: string }) => row.company_name))]
+
+    const client = new Anthropic({ apiKey: anthropicKey })
+    const { input: raw, stoppedEarly } =
+      await askClaude(client, mode, chunk.params, profile as Profile | null, appliedCompanies, usage, startedAt, tag)
+
+    // Validate (incl. the dealbreakers), score with ALL the run's cities and
+    // roles (so a chunk's city keeps its priority), store.
+    // already_applied is set by a database trigger.
+    const { results, candidates, fromListings, dropped, droppedBy } = validateResults(
+      raw, mode, rulesFromProfile(profile), budapestToday(), usage.fetchedUrls, scoringContext(params, profile),
+    )
+    const counts = { ...runCounts(candidates, droppedBy), stopped_early: stoppedEarly }
+    let saved: unknown[] = []
+    if (results.length > 0) {
+      const { data, error } = await admin
+        .from('search_results')
+        .insert(results.map((result) => ({ ...result, run_id: runId })))
+        .select('id, kind, title, company_name, city, remote, url, deadline, contact, reasons, score, already_applied')
+      if (error) throw new Error(`Could not store the results: ${error.message}`)
+      saved = data ?? []
+    }
+    await recordChunk(admin, runId, index, total, usage, counts, null)
+    console.log(`search ${tag} domains: ${domainStats(usage.fetchCallUrls, raw)}`)
+    console.log(`search ${tag} (${mode}): ${saved.length} results (${fromListings} from lists) of ${candidates} candidates, ` +
+      `${dropped} dropped ${JSON.stringify(droppedBy)}, ${usage.searches} searches, ` +
+      `${fetchesUsed(usage)} fetches (errors: ${usage.fetchErrors.join(', ') || 'none'}), ` +
+      `${usage.input} in / ${usage.output} out tokens, ${Math.round((Date.now() - startedAt) / 1000)} s` +
+      (stoppedEarly ? ', stopped early (time budget)' : ''))
+
+    return json(200, {
+      run_id: runId,
+      chunk: index,
+      label: chunk.label,
+      results: saved,
+      stopped_early: stoppedEarly,
+      counts: { ...counts, fetches_used: fetchesUsed(usage) },
+    })
+  } catch (error) {
+    const message = describeError(error)
+    console.error(`search ${tag} failed: ${message}`)
+    await recordChunk(admin, runId, index, total, usage, null, `${chunk.label}: ${message}`)
+    return json(502, { run_id: runId, chunk: index, label: chunk.label, error: message })
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS_HEADERS }) // CORS preflight
   if (req.method !== 'POST') return json(405, { error: 'Use POST' })
@@ -317,16 +461,15 @@ Deno.serve(async (req: Request) => {
   const { data: userData, error: userError } = await authClient.auth.getUser(token)
   if (userError || !userData.user) return json(401, { error: 'Log in first' })
 
-  // 2. Validate the body.
+  // 2. Validate the body: start a run, or run one of its chunks.
   let body: unknown
   try {
     body = await req.json()
   } catch {
     return json(400, { error: 'The body must be JSON' })
   }
-  const request = validateRequest(body)
+  const request = validateAction(body)
   if (!request.ok) return json(400, { error: request.error })
-  const { mode, params } = request.value
 
   // The service_role/secret client bypasses RLS: it is the only writer of
   // search_runs and search_results. It exists only inside this function.
@@ -334,90 +477,8 @@ Deno.serve(async (req: Request) => {
     auth: { persistSession: false, autoRefreshToken: false },
   })
 
-  // 3. Rate limit (and create the run) in one database call.
-  const { data: started, error: startError } = await admin.rpc('start_search_run', { p_mode: mode, p_params: params })
-  if (startError) return json(500, { error: 'Could not start the search run' })
-  const { run_id: runId, next_allowed_at: nextAllowedAt } = started[0]
-  if (runId === null) {
-    const retryAfter = Math.max(1, Math.ceil((new Date(nextAllowedAt).getTime() - Date.now()) / 1000))
-    return json(429, { error: 'One search per hour', next_allowed_at: nextAllowedAt }, { 'Retry-After': String(retryAfter) })
-  }
-
-  const startedAt = Date.now()
-  const usage: Usage = {
-    searches: 0, fetches: 0, fetchCalls: 0, fetchErrors: [], fetchedUrls: [], fetchCallUrls: [], input: 0, output: 0,
-  }
-  // Close the run. `counts` are the 010 columns (fetches, candidates, drops).
-  // If the database doesn't have them yet (migration 010 not applied), save
-  // the run without them: a run must never stay 'running' because of that.
-  const finish = async (fields: Record<string, unknown>, counts: Record<string, unknown> = {}) => {
-    const base = {
-      finished_at: new Date().toISOString(),
-      searches_used: usage.searches,
-      input_tokens: usage.input,
-      output_tokens: usage.output,
-      ...fields,
-    }
-    const { error } = await admin
-      .from('search_runs')
-      .update({ ...base, fetches_used: fetchesUsed(usage), ...counts })
-      .eq('id', runId)
-    if (error) {
-      console.warn(`search run ${runId}: counts not saved (${error.message}); is migration 010 applied?`)
-      await admin.from('search_runs').update(base).eq('id', runId)
-    }
-  }
-
-  try {
-    const [{ data: profile }, { data: applied }] = await Promise.all([
-      admin.from('search_profile').select('skills, seniority, cities, languages, preferred_roles, dealbreakers').maybeSingle(),
-      admin.from('applications').select('company_name').limit(500),
-    ])
-    const appliedCompanies = [...new Set((applied ?? []).map((row: { company_name: string }) => row.company_name))]
-
-    // 4. Claude + web search.
-    const client = new Anthropic({ apiKey: anthropicKey })
-    const { input: raw, stoppedEarly } =
-      await askClaude(client, mode, params, profile as Profile | null, appliedCompanies, usage, startedAt, runId)
-
-    // 5. Validate (incl. the profile's dealbreakers) and store.
-    // already_applied is set by a database trigger.
-    const { results, candidates, fromListings, dropped, droppedBy } =
-      validateResults(raw, mode, rulesFromProfile(profile), budapestToday(), usage.fetchedUrls)
-    const counts = { ...runCounts(candidates, droppedBy), stopped_early: stoppedEarly }
-    let stored: unknown[] = []
-    if (results.length > 0) {
-      const { data, error } = await admin
-        .from('search_results')
-        .insert(results.map((result) => ({ ...result, run_id: runId })))
-        .select('id, kind, title, company_name, city, remote, url, deadline, contact, reasons, score, already_applied')
-      if (error) throw new Error(`Could not store the results: ${error.message}`)
-      stored = (data ?? []).sort((a: { score: number }, b: { score: number }) => b.score - a.score)
-    }
-    await finish({ status: 'success' }, counts)
-    console.log(`search run ${runId} domains: ${domainStats(usage.fetchCallUrls, raw)}`)
-    console.log(`search run ${runId} (${mode}): ${stored.length} results (${fromListings} from lists) ` +
-      `of ${candidates} candidates, ` +
-      `${dropped} dropped ${JSON.stringify(droppedBy)}, ${usage.searches} searches, ` +
-      `${fetchesUsed(usage)} fetches (errors: ${usage.fetchErrors.join(', ') || 'none'}), ` +
-      `${usage.input} in / ${usage.output} out tokens, ${Math.round((Date.now() - startedAt) / 1000)} s` +
-      (stoppedEarly ? ', stopped early (time budget)' : ''))
-
-    return json(200, {
-      run_id: runId,
-      results: stored,
-      dropped,
-      dropped_by: droppedBy,
-      stopped_early: stoppedEarly, // the page tells me the list may be incomplete
-      // The same counts as in search_runs (010), so the page can explain a run
-      // with 0 results even before the migration is applied.
-      counts: { ...counts, fetches_used: fetchesUsed(usage) },
-      usage: { searches: usage.searches, input_tokens: usage.input, output_tokens: usage.output },
-    })
-  } catch (error) {
-    const message = describeError(error)
-    console.error(`search run ${runId} failed: ${message}`)
-    await finish({ status: 'error', error: message })
-    return json(502, { run_id: runId, error: message })
-  }
+  const action = request.value
+  return action.action === 'start'
+    ? startRun(admin, action.mode, action.params)
+    : runChunk(admin, anthropicKey, action.runId, action.chunk)
 })

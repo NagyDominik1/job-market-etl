@@ -196,6 +196,22 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   seniority/years rules apply only when known. No new column: a "~ seen on a job list
   page" reason marks them on the tab. The log has one line per run with fetches and
   candidates per domain (domainStats).
+- Search runs in chunks (after run 9 timed out: the whole search was one long Claude request,
+  58 s in run 8, which the wrap-up can't interrupt). One chunk per city (priority order), or
+  per country when no city is given, plus remote; max 6. The dashboard calls the function
+  with {action: "start"} (rate limit, chunk list) and then {action: "chunk", run_id, chunk}
+  one after another, showing progress per chunk; a failed chunk is recorded and the next
+  one runs. Per chunk: 4 searches, 4 fetches, its own 60 s (wrap-up after 35 s), its own
+  query plan. Migration 013: chunks_total / next_chunk / chunks_failed / last_activity_at;
+  claim_search_chunk() lets each chunk run once and in order (no extra searches past the
+  rate limit), and the chunk is rebuilt from the run's stored params, never from the
+  browser. The hourly limit counts runs. Stuck = no activity for 5 min; a stuck run with
+  results becomes success (it counts), without results error (it doesn't).
+- The model reports facts only (title, company, city, skills, level, years, source; at most
+  10 postings per list page). Score and reasons are computed by our code (score.ts, the
+  weights of src/scoring.py; companies: city 30, stack 30, junior-friendly 20, contact 20),
+  with the run's cities/roles/levels and the profile's skills. Skills match by name only
+  (no alias vocabulary like the Python version).
 - linkedin.com is never fetched (its terms forbid automated access): it is in web_fetch's
   blocked_domains (FETCH_BLOCKED_DOMAINS in validate.ts), so LinkedIn is used only through
   search results. A LinkedIn posting counts only if Claude finds and opens the same posting

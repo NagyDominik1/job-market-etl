@@ -78,9 +78,10 @@ def test_a_failed_run_that_cost_tokens_does_not_count_either(conn):
 
 
 def test_a_run_stuck_in_running_is_closed_as_timeout_and_does_not_count(conn):
-    # 009: the Edge Function was killed and never finished its run.
+    # 009: the Edge Function was killed and never finished its run (013: no activity for 5 min).
     stuck, _ = start_run(conn)
-    conn.execute("UPDATE search_runs SET started_at = now() - interval '6 minutes' WHERE id = %s", (stuck,))
+    conn.execute("UPDATE search_runs SET started_at = now() - interval '6 minutes', "
+                 "last_activity_at = now() - interval '6 minutes' WHERE id = %s", (stuck,))
     assert start_run(conn)[0] is not None
     status, error, finished = conn.execute(
         "SELECT status, error, finished_at FROM search_runs WHERE id = %s", (stuck,)).fetchone()
@@ -257,3 +258,71 @@ def test_service_role_can_do_what_the_edge_function_needs(conn_with_roles):
             "VALUES (%s, 'company', 'Acme', 'https://acme.example') RETURNING id", (run_id,))
     as_role(conn, "service_role",
             "UPDATE search_runs SET status = 'success', searches_used = 3 WHERE id = %s RETURNING id", (run_id,))
+
+
+# --- chunks (013) ----------------------------------------------------------------------------
+
+def start_chunked(conn, chunks=3):
+    run_id, _ = start_run(conn, "jobs", {"cities": ["Szeged", "Subotica"]})
+    conn.execute("UPDATE search_runs SET chunks_total = %s WHERE id = %s", (chunks, run_id))
+    return run_id
+
+
+def claim(conn, run_id, chunk):
+    return conn.execute("SELECT mode, params, chunks_total FROM claim_search_chunk(%s, %s)", (run_id, chunk)).fetchall()
+
+
+def test_chunks_are_claimed_once_and_in_order(conn):
+    run_id = start_chunked(conn, chunks=2)
+    assert claim(conn, run_id, 1) == []                      # not chunk 0 first: refused
+    assert claim(conn, run_id, 0) == [("jobs", {"cities": ["Szeged", "Subotica"]}, 2)]
+    assert claim(conn, run_id, 0) == []                      # the same chunk again: refused
+    assert len(claim(conn, run_id, 1)) == 1
+    assert claim(conn, run_id, 2) == []                      # past the last chunk
+
+
+def test_a_finished_run_has_no_more_chunks(conn):
+    run_id = start_chunked(conn)
+    conn.execute("UPDATE search_runs SET status = 'success' WHERE id = %s", (run_id,))
+    assert claim(conn, run_id, 0) == []
+
+
+def test_a_run_from_before_013_has_no_chunks(conn):
+    run_id, _ = start_run(conn)                               # chunks_total stays NULL
+    assert claim(conn, run_id, 0) == []
+
+
+def test_a_long_run_with_recent_chunk_activity_is_not_stuck(conn):
+    # 6 chunks may take ~6 minutes; only inactivity means stuck.
+    run_id = start_chunked(conn)
+    conn.execute("UPDATE search_runs SET started_at = now() - interval '7 minutes', "
+                 "last_activity_at = now() - interval '1 minute' WHERE id = %s", (run_id,))
+    assert start_run(conn)[0] is None                         # still running, still counts
+    assert conn.execute("SELECT status FROM search_runs WHERE id = %s", (run_id,)).fetchone() == ("running",)
+
+
+def test_an_abandoned_run_with_results_is_closed_as_success_and_counts(conn):
+    run_id = start_chunked(conn)
+    add_result(conn, run_id)
+    conn.execute("UPDATE search_runs SET started_at = now() - interval '10 minutes', "
+                 "last_activity_at = now() - interval '6 minutes' WHERE id = %s", (run_id,))
+    assert start_run(conn)[0] is None                         # it gave results: the hour counts
+    status, error = conn.execute("SELECT status, error FROM search_runs WHERE id = %s", (run_id,)).fetchone()
+    assert status == "success" and "timeout" in error
+
+
+def test_an_abandoned_run_without_results_is_an_error_and_does_not_count(conn):
+    run_id = start_chunked(conn)
+    conn.execute("UPDATE search_runs SET error = 'Szeged: timed out', started_at = now() - interval '10 minutes', "
+                 "last_activity_at = now() - interval '6 minutes' WHERE id = %s", (run_id,))
+    assert start_run(conn)[0] is not None
+    status, error = conn.execute("SELECT status, error FROM search_runs WHERE id = %s", (run_id,)).fetchone()
+    assert status == "error" and error.startswith("Szeged: timed out; timeout")
+
+
+def test_only_the_edge_function_may_claim_chunks(conn_with_roles):
+    for role in ("anon", "authenticated"):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            as_role(conn_with_roles, role, "SELECT * FROM claim_search_chunk(1, 0)")
+    conn_with_roles.execute("UPDATE search_runs SET chunks_total = 1")
+    assert len(as_role(conn_with_roles, "service_role", "SELECT * FROM claim_search_chunk(1, 0)")) == 1
