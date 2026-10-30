@@ -3,11 +3,12 @@ import { configError, supabase } from './supabase.js'
 import Login from './Login.jsx'
 import JobFeed from './JobFeed.jsx'
 import SearchTab from './SearchTab.jsx'
+import TrackerTab from './TrackerTab.jsx'
 
 export default function App() {
   // undefined = still checking, null = logged out, object = logged in
   const [session, setSession] = useState(undefined)
-  const [tab, setTab] = useState('feed') // 'feed' | 'search'
+  const [tab, setTab] = useState('feed') // 'feed' | 'search' | 'tracker'
 
   useEffect(() => {
     if (configError) return
@@ -30,8 +31,13 @@ export default function App() {
         <button className={tab === 'search' ? '' : 'secondary'} onClick={() => setTab('search')}>
           Keresés
         </button>
+        <button className={tab === 'tracker' ? '' : 'secondary'} onClick={() => setTab('tracker')}>
+          Jelentkezéseim
+        </button>
       </nav>
-      {tab === 'feed' ? <JobFeed session={session} /> : <SearchTab session={session} />}
+      {tab === 'feed' && <JobFeed session={session} />}
+      {tab === 'search' && <SearchTab session={session} />}
+      {tab === 'tracker' && <TrackerTab session={session} />}
     </>
   )
 }

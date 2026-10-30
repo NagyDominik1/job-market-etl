@@ -1,3 +1,6 @@
+import AddToApplications from './AddToApplications.jsx'
+import { safeHref } from './applications.js'
+
 const DAY_MS = 24 * 60 * 60 * 1000
 
 function formatDate(value) {
@@ -64,6 +67,18 @@ export default function JobCard({ job }) {
         <span>First seen: {formatDate(job.first_seen_at)}</span>
         {job.sources && <span>Sources: {job.sources}</span>}
       </footer>
+      {job.company_name && (
+        <AddToApplications
+          fields={{
+            company_name: job.company_name,
+            position: job.title,
+            city: job.location,
+            posting_url: safeHref(job.url),
+            deadline: job.deadline,
+            job_id: job.id, // links the application to this pipeline job
+          }}
+        />
+      )}
     </article>
   )
 }

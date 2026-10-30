@@ -46,6 +46,9 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 - application_events (006; id, application_id FK ON DELETE CASCADE, event_type, occurred_at
   DATE default local_today(), body, stated_date; stated_date required for 'stated_date')
 - Views todays_actions, expiring (006, security_invoker)
+- Tracker write access (011/012): authenticated may INSERT/UPDATE applications (only the
+  columns typed in: company_name, position, city, language, cv_variant, job_id, posting_url
+  (http(s) CHECK), deadline, notes) and INSERT application_events; no DELETE anywhere
 
 ## Decisions
 - Simple SQL migrations instead of Alembic/SQLAlchemy: numbered plain .sql files in
@@ -152,15 +155,15 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 - Node/npm for the dashboard: versions pinned in package.json, package-lock.json
   committed; Node is not required for the pipeline.
 - AI search confirms job results with Anthropic's web_fetch (single posting pages Claude
-  found by search, max 8 per run, max 1 run per hour, robots.txt respected by the
+  found by search, max 12 per run, max 1 run per hour, robots.txt respected by the
   fetcher). Our code fetches nothing; this is on-demand reading of individual postings,
   not a crawler, so it stays within the "no scraping" rule. The code drops job results
   that aren't confirmed, link to a list/search page (isListingUrl, a heuristic), or hit a
   profile dealbreaker (seniority, min_years_required, title keywords) - the prompt asks
   for the same, the code enforces it.
 - Search run time budget: Supabase kills an Edge Function at 150 s wall clock (run 4 was
-  killed: 15 searches + 20 fetches, and a timeout retried by the SDK). Now max 8 searches +
-  8 fetches, no SDK retries, the whole run within 95 s: after 55 s Claude is told to stop
+  killed: 15 searches + 20 fetches, and a timeout retried by the SDK). Now max 12 searches +
+  12 fetches (8 + 8 until run 7, which used 44 s), no SDK retries, the whole run within 95 s: after 55 s Claude is told to stop
   and submit what it has confirmed (25 s reserved for that), so confirmed results are
   saved instead of lost; the response says stopped_early. A killed run can't close its
   row, so start_search_run() (009) marks runs 'running' for > 5 min as 'error' (timeout);
@@ -177,7 +180,7 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   missing, so a run never stays 'running' because the code is ahead of the database.
 - Search agent shape (after run 6: 3 of 8 searches, 2 of 8 fetches, 0 candidates, 15 s):
   effort medium; the query plan is built in code (buildQueryPlan: city x role, best pairs
-  first, Hungarian "állás" / Serbian "posao" wording by city, one remote query, max 8) and
+  first, Hungarian "állás" / Serbian "posao" wording by city, one remote query, max 12 = MAX_SEARCHES) and
   given to the model as a numbered list; the model submits EVERY posting it opened and only
   our code filters (so dropped_* explains every drop; past deadlines count as other); one
   "keep going with the remaining queries" rejection when it submits < 5 candidates while
@@ -186,6 +189,15 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   blocked_domains (FETCH_BLOCKED_DOMAINS in validate.ts), so LinkedIn is used only through
   search results. A LinkedIn posting counts only if Claude finds and opens the same posting
   elsewhere; a job result that still links to linkedin.com is dropped as unconfirmed.
+- Tracker writes (9.4, migration 011): the dashboard inserts applications and events only.
+  status / applied_at / next_action_* are not in the column grants, so they change only
+  through an event (the history always explains the status); the event trigger is
+  SECURITY DEFINER for that (search_path pinned; EXECUTE revoked in 012). application_events
+  is append-only (no UPDATE: the trigger is AFTER INSERT, an edited event would leave the
+  status out of sync; no DELETE): fix a mistake with a new event or a note. "Hozzáadom"
+  (Job feed, Keresés) and "Új jelentkezés" insert the application, then a 'saved' event;
+  a duplicate warning first asks the database for normalize_company_key(name) (rpc), so
+  there is no JS copy of the company rules.
 
 ## Known limitations
 - The same job posted with a Hungarian and a Serbian (or English) title is NOT matched
@@ -267,5 +279,8 @@ id in search_runs.error. Migration 008: failed runs (status error) never count t
 1-per-hour limit (applied to Supabase by the next pipeline run).
 Localhost magic-link login still redirects to Vercel (emailRedirectTo now ends in "/";
 check the Supabase email template and Redirect URLs).
-Next: 9.4 (Jelentkezéseim tab).
+Phase 9.4 on branch phase-9-4-tracker-ui (not merged yet): migration 011 applied to
+Supabase, 012 (revoke EXECUTE on the trigger function) waiting for the next pipeline run;
+Jelentkezéseim tab; search budget 12 searches + 12 fetches (function version 9).
+Next: 9.5 (draft-letter).
 Open phases: 4 (Gmail IMAP), 5 (ATS), 6 (report).

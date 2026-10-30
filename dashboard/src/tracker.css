@@ -1,0 +1,184 @@
+/* Styles for the "Jelentkezéseim" tab and the Hozzáadom button. Uses the
+   colour variables of styles.css, so light and dark mode work the same way. */
+
+textarea {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font: inherit;
+  color: inherit;
+}
+
+.box {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.box h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.box ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.todo-lists {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0 1rem 0.75rem;
+}
+
+@media (min-width: 48rem) {
+  .todo-lists {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.overdue {
+  color: var(--minus);
+}
+
+.tracker-filters {
+  align-items: end;
+}
+
+@media (min-width: 40rem) {
+  .tracker-filters {
+    grid-template-columns: 1fr 1fr auto;
+  }
+
+  .app-form {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.app-form .wide {
+  grid-column: 1 / -1;
+}
+
+.form-buttons,
+.event-buttons,
+.card-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.application .card-foot,
+.application .notes {
+  margin: 0.4rem 0;
+}
+
+.application.finished {
+  opacity: 0.75;
+}
+
+.app-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.next-action {
+  color: var(--mid);
+}
+
+.notes {
+  white-space: pre-wrap;   /* keep the line breaks I typed */
+  font-size: 0.9rem;
+}
+
+button.small {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+button.link {
+  padding: 0.2rem 0;
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.event-form {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+  padding: 0.6rem;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.event-form label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.history {
+  margin: 0.4rem 0 0;
+  padding-left: 1.3rem;
+  font-size: 0.9rem;
+}
+
+.history-date {
+  color: var(--muted);
+}
+
+.history-body {
+  display: block;
+  white-space: pre-wrap;
+  color: var(--muted);
+}
+
+/* Status badges: active = accent, waiting = amber, finished = grey/green. */
+.badge.status-saved,
+.badge.status-sent,
+.badge.status-in_progress {
+  background: var(--accent);
+}
+
+.badge.status-no_response,
+.badge.status-rejected {
+  background: var(--low);
+}
+
+.badge.status-offer {
+  background: var(--high);
+}
+
+.add-action,
+.duplicate-warning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.duplicate-warning p {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--mid);
+}
+
+.duplicate-warning.box {
+  margin: 0 1rem 0.75rem;
+}
+
+.add-done {
+  display: inline-block;
+  margin-top: 0.5rem;
+  color: var(--plus);
+  font-size: 0.9rem;
+}
+
+.add-action .status {
+  padding: 0;
+}

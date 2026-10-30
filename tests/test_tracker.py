@@ -238,12 +238,11 @@ def test_authenticated_sees_the_rows(conn_with_roles):
 
 
 @pytest.mark.parametrize("sql", [
-    "INSERT INTO applications (company_name) VALUES ('x')",        # write policies come in 9.4
-    "UPDATE applications SET notes = 'x'",
+    # 011 allows INSERT/UPDATE (tests/test_tracker_write.py); DELETE stays forbidden.
     "DELETE FROM applications",
-    "INSERT INTO application_events (application_id, event_type) VALUES (1, 'note')",
+    "DELETE FROM application_events",
 ])
-def test_authenticated_cannot_write_yet(conn_with_roles, sql):
+def test_authenticated_cannot_delete(conn_with_roles, sql):
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         as_role(conn_with_roles, "authenticated", sql)
 

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from './supabase.js'
+import AddToApplications from './AddToApplications.jsx'
+import { safeHref } from './applications.js'
 import './search.css'
 
 // The "Keresés" tab (Phase 9.3): starts the Edge Function "search" and shows
@@ -22,10 +24,6 @@ function splitList(text) {
 
 // Links come from web pages: render them only if they are http(s). The
 // database and the Edge Function check this too; this is the third check.
-function safeHref(url) {
-  return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null
-}
-
 function contactHref(value) {
   if (!value) return null
   if (/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(value)) return `mailto:${value}`
@@ -165,6 +163,15 @@ function ResultCard({ result }) {
           )}
         </footer>
       )}
+      <AddToApplications
+        fields={{
+          company_name: result.company_name,
+          position: result.title, // companies: NULL = open application
+          city: result.city,
+          posting_url: href ?? safeHref(result.contact),
+          deadline: result.deadline,
+        }}
+      />
     </article>
   )
 }
@@ -314,7 +321,7 @@ export default function SearchTab({ session }) {
         <button type="submit" disabled={loading}>
           {loading ? `Keresés… ${seconds} s` : 'Keresés indítása'}
         </button>
-        <span className="hint">Óránként egy keresés; legfeljebb 8 webes keresés (~$0.08) és kb. 1,5 perc.</span>
+        <span className="hint">Óránként egy keresés; legfeljebb 12 webes keresés (~$0.12) és kb. 1,5 perc.</span>
       </form>
 
       {error && <p className="status error" role="alert">{error}</p>}

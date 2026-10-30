@@ -6,9 +6,10 @@ import { FETCH_BLOCKED_DOMAINS, type Mode, type SearchParams } from './validate.
 export const MODEL = 'claude-haiku-5-5'
 // Budgets per run. Small on purpose: every search or fetch takes seconds, and
 // a run must finish in ~95 s (Supabase kills the function at 150 s; run 4 with
-// 15 + 20 was killed).
-export const MAX_SEARCHES = 8 // web searches per run ($10 per 1000)
-export const MAX_FETCHES = 8 // posting pages opened per run (no extra fee, only tokens)
+// 15 + 20 was killed). 12 + 12 since run 7 (8 + 8 took 44 s of 95 s); the
+// 55 s wrap-up still ends a slow run in time.
+export const MAX_SEARCHES = 12 // web searches per run ($10 per 1000)
+export const MAX_FETCHES = 12 // posting pages opened per run (no extra fee, only tokens)
 const FETCH_MAX_TOKENS = 8000 // per page: a posting fits, a huge page is cut
 
 /** The search_profile row (migration 007); every field may be empty. */

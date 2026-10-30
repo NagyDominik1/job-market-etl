@@ -12,12 +12,12 @@ const PERIODS = {
 
 // Remove characters that have a meaning in ILIKE patterns (% _) or in
 // PostgREST's filter syntax (, ( ) " \ *), so typed text is matched literally.
-function cleanSearch(text) {
+export function cleanSearch(text) {
   return text.replace(/[%_,()"\\*]/g, ' ').trim()
 }
 
 // Wait until the user stops typing before querying the database.
-function useDebounced(value, delayMs = 300) {
+export function useDebounced(value, delayMs = 300) {
   const [debounced, setDebounced] = useState(value)
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(value), delayMs)

@@ -368,9 +368,11 @@ test('the jobs prompt says LinkedIn is search-only', () => {
 // --- time budget -------------------------------------------------------------------------------
 
 test('budgets stay small enough for the ~95 s run limit (run 4 with 15 + 20 was killed)', () => {
-  assert.ok(MAX_SEARCHES <= 8, `MAX_SEARCHES ${MAX_SEARCHES}`)
-  assert.ok(MAX_FETCHES <= 8, `MAX_FETCHES ${MAX_FETCHES}`)
-  assert.match(buildUserPrompt('jobs', PARAMS, null, [], '2026-10-30'), /up to 8/)
+  // Run 7 used 44 s of 95 s with 8 + 8, so 12 + 12; the 55 s wrap-up covers a slow run.
+  assert.equal(MAX_SEARCHES, 12)
+  assert.equal(MAX_FETCHES, 12)
+  assert.ok(MAX_SEARCHES < 15 && MAX_FETCHES < 20, 'below the budgets that got run 4 killed')
+  assert.match(buildUserPrompt('jobs', PARAMS, null, [], '2026-10-30'), /up to 12 pages/)
 })
 
 // --- query plan and "submit everything" (run 6) -------------------------------------------------
