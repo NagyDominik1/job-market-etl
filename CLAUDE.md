@@ -283,7 +283,7 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   values only in the gitignored sql/search_profile_local.sql). Checked in code: chosen
   language, no years/seniority claims, at least one listed project named; else asked once
   more, then a rule-based sentence about the best-fitting project (whole-word skill match;
-  Serbian without gendered verbs). Two sentences that would make the letter longer than 5:
+  Serbian: masculine past-tense forms, as I asked). Two sentences that would make the letter longer than 5:
   only the first is kept.
 - Search, employer names (after run 11): company_name must be the employer named in the
   posting (prompt + schema description). The code drops results whose "company" is a job

@@ -209,7 +209,7 @@ test('best project: by the posting skills and requirements, whole words only', (
   assert.equal(bestProject(PROJECTS, [], ['React.js'])?.name, 'Studio Present')
 })
 
-test('project sentences: real names only, Hungarian article, Serbian without gendered verbs', () => {
+test('project sentences: real names only, Hungarian article, Serbian noun phrases', () => {
   assert.equal(projectSentence('hu', PROJECTS[0]), 'A Personal Trainer projektemben PHP, MySQL és REST API technológiákkal dolgoztam.')
   assert.equal(projectSentence('hu', PROJECTS[3]), 'React gyakornokként dolgoztam a Studio Present cégnél.')
   assert.equal(projectSentence('en', PROJECTS[1]), 'In my Voyager Unit project I worked with C# and Unity.')
@@ -231,5 +231,5 @@ test('prompt: requirements, company sentence and the real projects, with the no-
   assert.match(prompt, /Personal Trainer \(PHP, MySQL, REST API\); .*internship at Studio Present \(React\)/)
   assert.match(SYSTEM_PROMPT, /never invent experience/)
   assert.match(SYSTEM_PROMPT, /one or two sentences/)
-  assert.match(SYSTEM_PROMPT, /gendered/)
+  assert.match(SYSTEM_PROMPT, /applicant is male: masculine/)
 })

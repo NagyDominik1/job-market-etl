@@ -270,7 +270,7 @@ export function bestProject(projects: Project[], skills: string[], requirements:
   return best
 }
 
-/** One sentence about a real project, in the letter's language (Serbian without gendered verbs). */
+/** One sentence about a real project, in the letter's language (the rule-based Serbian sentences use noun phrases, no verb forms needed). */
 export function projectSentence(language: Language, project: Project): string {
   const skills = joinList(project.skills, AND[language])
   if (project.kind === 'internship') {
@@ -417,7 +417,7 @@ name the project(s) exactly as listed and the matching technology. Rules:
 - only the listed projects and skills exist: never invent experience, employers, years,
   numbers, results or projects; never claim seniority
 - if no requirement matches a project, name the closest real project honestly
-- Serbian: avoid gendered past-tense verb forms (use the present tense or noun phrases)
+- Serbian: the applicant is male: masculine first-person past forms are right (radio sam, koristio sam)
 - no greeting, no closing, no name, no placeholders, no quotation marks
 - plain and direct, not flattering ("I am passionate about..." is not wanted)
 
