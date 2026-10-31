@@ -1,8 +1,8 @@
 // Edge Function "draft-letter" (Phase 9.5): a short application letter.
 //
-// Browser (logged in) --POST {application_id | search_result_id, language?}--> this function
+// Browser (logged in) --POST {application_id | search_result_id, language}--> this function
 //     -> my template (letter_templates) + ONE tailored sentence from Claude
-//     -> {subject, body, language + reason, suggested CV, contact}
+//     -> {subject, body, language, suggested CV, contact}
 //
 // The letter is only returned and shown: I copy it or open it in my mail
 // program and send it myself. Nothing here sends e-mail.
@@ -11,16 +11,18 @@
 // read only here; the caller must be a logged-in user (no token -> 401); the
 // service_role client exists only inside the function. No web tools: Claude
 // only sees what our database already has (the posting text, match reasons).
-// Language and CV are decided by plain rules (letter.ts); if Claude fails, a
-// rule-based line from the match reasons is used (Claude is optional, like
+// I pick the language on the dashboard; the CV follows from it (letter.ts).
+// The tailored line must be in that language: if it looks like another one,
+// Claude is asked once more; if it fails again (or Claude is not available),
+// a rule-based line from the match reasons is used (Claude is optional, like
 // in the pipeline), and line_by says which.
 
 import Anthropic from 'npm:@anthropic-ai/sdk@1.3.0'
 import { createClient } from 'npm:@supabase/supabase-js@2.118.0'
 import {
-  type Kind, LINE_SCHEMA, MAX_SENTENCES, MODEL, SYSTEM_PROMPT, buildLinePrompt, chooseLanguage,
-  countSentences, fallbackLine, fillTemplate, isEmail, matchedSkills, oneSentence, suggestCv, unknownPlaceholders,
-  validateDraftRequest,
+  type Kind, LINE_SCHEMA, MAX_SENTENCES, MODEL, SYSTEM_PROMPT, buildLinePrompt, countSentences, fallbackLine,
+  fillTemplate, isEmail, joinSkills, matchedSkills, oneSentence, skillsForLetter, suggestCv, unknownPlaceholders,
+  validateDraftRequest, wrongLanguage, wrongLanguageMessage,
 } from './letter.ts'
 
 const MAX_DRAFTS_PER_HOUR = 30 // a cost cap against a stuck button or a loop (one letter ~ a fraction of a cent)
@@ -75,7 +77,6 @@ interface Source {
   city: string | null
   url: string | null
   remote: boolean
-  applicationLanguage: string | null
   reasons: string[]
   postingText: string
   contact: string | null
@@ -90,11 +91,11 @@ async function loadSource(admin: Admin, applicationId: number | null, searchResu
     return {
       applicationId: null, searchResultId: r.id, company: r.company_name, companyKey: r.company_key,
       position: r.kind === 'job' ? r.title : null, city: r.city, url: r.url, remote: r.remote === true,
-      applicationLanguage: null, reasons: r.reasons ?? [], postingText: r.title ?? '', contact: r.contact,
+      reasons: r.reasons ?? [], postingText: r.title ?? '', contact: r.contact,
     }
   }
   const { data: a } = await admin.from('applications')
-    .select('id, company_name, company_key, position, city, posting_url, language, job_id')
+    .select('id, company_name, company_key, position, city, posting_url, job_id')
     .eq('id', applicationId).maybeSingle()
   if (!a) return null
   let reasons: string[] = []
@@ -127,16 +128,15 @@ async function loadSource(admin: Admin, applicationId: number | null, searchResu
     .eq('company_key', a.company_key).not('contact', 'is', null).order('id', { ascending: false }).limit(1)
   return {
     applicationId: a.id, searchResultId: null, company: a.company_name, companyKey: a.company_key,
-    position: a.position, city, url: a.posting_url, remote, applicationLanguage: a.language, reasons, postingText,
+    position: a.position, city, url: a.posting_url, remote, reasons, postingText,
     contact: contacts?.[0]?.contact ?? null,
   }
 }
 
 /** Claude's one sentence + the tokens used. Throws on any API problem. */
 async function askForLine(
-  apiKey: string, prompt: string,
-): Promise<{ line: string; input: number; output: number }> {
-  const client = new Anthropic({ apiKey })
+  client: Anthropic, messages: Anthropic.Messages.MessageParam[],
+): Promise<{ line: string; text: string; input: number; output: number }> {
   const response = await client.messages.create(
     {
       model: MODEL,
@@ -144,7 +144,7 @@ async function askForLine(
       // low effort: one short sentence; structured output guarantees the JSON shape.
       output_config: { effort: 'low', format: { type: 'json_schema', schema: LINE_SCHEMA } },
       system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: prompt }],
+      messages,
     },
     // A timeout and one retry (HTTP rule of the project); the function stays well under 150 s.
     { timeout: 30_000, maxRetries: 1 },
@@ -156,7 +156,7 @@ async function askForLine(
   const text = response.content.find((block): block is Anthropic.Messages.TextBlock => block.type === 'text')?.text ?? ''
   const line = oneSentence((JSON.parse(text) as { tailored_line?: unknown }).tailored_line)
   if (!line) throw Object.assign(new Error('Claude returned an empty line'), { input, output })
-  return { line, input, output }
+  return { line, text, input, output }
 }
 
 Deno.serve(async (req: Request) => {
@@ -182,7 +182,7 @@ Deno.serve(async (req: Request) => {
   }
   const request = validateDraftRequest(body)
   if (!request.ok) return json(400, { error: request.error })
-  const { applicationId, searchResultId, language: chosen } = request.value
+  const { applicationId, searchResultId, language } = request.value
 
   const admin = createClient(supabaseUrl, supabaseKey('SUPABASE_SECRET_KEYS', 'SUPABASE_SERVICE_ROLE_KEY'), {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -197,11 +197,7 @@ Deno.serve(async (req: Request) => {
   const source = await loadSource(admin, applicationId, searchResultId)
   if (!source) return json(404, { error: 'No such application or search result' })
 
-  // 4. Rules: language, CV, kind, template.
-  const { language, reason } = chooseLanguage({
-    chosen, applicationLanguage: source.applicationLanguage, city: source.city, url: source.url,
-    remote: source.remote, text: source.postingText,
-  })
+  // 4. Rules: CV (from my language choice), kind, template.
   const kind: Kind = source.position ? 'posting' : 'open'
   const cv = suggestCv(language)
   const { data: template } = await admin.from('letter_templates').select('subject, body')
@@ -225,27 +221,46 @@ Deno.serve(async (req: Request) => {
   })
   let line = ''
   let lineBy: 'claude' | 'rules' = 'claude'
-  let tokens = { input: 0, output: 0 }
+  const tokens = { input: 0, output: 0 }
   let claudeError: string | null = null
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY')
   try {
     if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set')
-    const answer = await askForLine(apiKey, prompt)
-    line = answer.line
-    tokens = { input: answer.input, output: answer.output }
+    const client = new Anthropic({ apiKey })
+    const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt }]
+    // At most two requests: the second only when the first line is in the wrong language.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const answer = await askForLine(client, messages)
+      tokens.input += answer.input
+      tokens.output += answer.output
+      if (!wrongLanguage(answer.line, language)) {
+        line = answer.line
+        break
+      }
+      console.log(`draft-letter: attempt ${attempt}: the line is not in ${language}`)
+      messages.push({ role: 'assistant', content: answer.text })
+      messages.push({ role: 'user', content: wrongLanguageMessage(language) })
+    }
+    if (!line) throw new Error(`the line was not in ${language} twice`)
   } catch (error) {
     const spent = error as { input?: number; output?: number }
-    tokens = { input: spent.input ?? 0, output: spent.output ?? 0 }
+    tokens.input += spent.input ?? 0
+    tokens.output += spent.output ?? 0
     claudeError = describeError(error)
-    console.error(`draft-letter: Claude failed, rule-based line instead (${claudeError})`)
+    console.error(`draft-letter: no usable Claude line, rule-based line instead (${claudeError})`)
     line = fallbackLine(language, matchedSkills(source.reasons))
     lineBy = 'rules'
   }
 
-  // 6. Fill and check the limit.
-  const values = { company: source.company, position: source.position ?? '', tailored_line: line }
-  const subject = fillTemplate(template.subject, values)
-  const letter = fillTemplate(template.body, values)
+  // 6. Fill and check the limit. Skills: the ones the posting matched first, max 4.
+  const values = {
+    company: source.company,
+    position: source.position ?? '',
+    skills: joinSkills(skillsForLetter(source.reasons, (profile?.skills ?? {}) as Record<string, number>), language),
+    tailored_line: line,
+  }
+  const subject = fillTemplate(template.subject, values, language)
+  const letter = fillTemplate(template.body, values, language)
   const sentences = countSentences(letter)
   if (sentences > MAX_SENTENCES) {
     await log({ status: 'error', input_tokens: tokens.input, output_tokens: tokens.output, error: `${sentences} sentences` })
@@ -257,14 +272,13 @@ Deno.serve(async (req: Request) => {
   })
   if (logError) console.error(`draft-letter: could not log the draft (${logError.message})`)
   console.log(`draft-letter ${applicationId ? `application ${applicationId}` : `search result ${searchResultId}`}: ` +
-    `${language} (${reason}), ${kind}, CV ${cv}, line by ${lineBy}, ${sentences} sentences, ` +
+    `${language}, ${kind}, CV ${cv}, line by ${lineBy}, ${sentences} sentences, ` +
     `${tokens.input} in / ${tokens.output} out tokens`)
 
   return json(200, {
     subject,
     body: letter,
     language,
-    language_reason: reason,
     kind,
     cv_variant: cv,
     contact: source.contact,

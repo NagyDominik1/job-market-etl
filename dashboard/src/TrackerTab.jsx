@@ -270,7 +270,7 @@ function ApplicationCard({ app, onChanged }) {
       <div className="card-links">
         <button className="link" onClick={() => setOpen(!open)}>{open ? 'Előzmények elrejtése' : 'Előzmények'}</button>
         <button className="link" onClick={() => setEditing(!editing)}>Adatok szerkesztése</button>
-        <LetterButton target={{ application_id: app.id }} />
+        <LetterButton target={{ application_id: app.id }} defaultLanguage={app.language} />
       </div>
       {editing && <ApplicationForm initial={toForm(app)} submitLabel="Mentés" onSubmit={saveEdit} onCancel={() => setEditing(false)} />}
       {open && <History applicationId={app.id} version={version} />}

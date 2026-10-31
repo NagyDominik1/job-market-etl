@@ -5,7 +5,7 @@
 // separately; the function checks again, so a drift can't produce a long letter.
 
 export const MAX_SENTENCES = 5
-export const PLACEHOLDERS = ['company', 'position', 'tailored_line']
+export const PLACEHOLDERS = ['company', 'position', 'skills', 'tailored_line']
 
 export const LANGUAGE_LABELS = { hu: 'magyar', sr: 'szerb', en: 'angol' }
 export const KIND_LABELS = { posting: 'hirdetésre', open: 'nyílt jelentkezés' }

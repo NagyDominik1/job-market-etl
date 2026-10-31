@@ -4,51 +4,22 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  LINE_SCHEMA, MAX_SENTENCES, MODEL, SYSTEM_PROMPT, buildLinePrompt, chooseLanguage, countSentences, countryOf,
-  fallbackLine, fillTemplate, isEmail, looksSerbian, matchedSkills, oneSentence, suggestCv, templateSentences,
-  unknownPlaceholders, validateDraftRequest,
+  LINE_SCHEMA, MAX_SENTENCES, MODEL, SYSTEM_PROMPT, buildLinePrompt, countSentences, fallbackLine, fillTemplate,
+  fixHungarianArticles, hungarianArticle, isEmail, joinSkills, languageScores, matchedSkills, oneSentence,
+  skillsForLetter, suggestCv, templateSentences, unknownPlaceholders, validateDraftRequest, wrongLanguage,
+  wrongLanguageMessage,
 } from './letter.ts'
 
-const FACTS = { chosen: null, applicationLanguage: null, city: null, url: null, remote: false, text: '' }
-
-test('request: exactly one of application_id / search_result_id, optional language', () => {
-  assert.deepEqual(validateDraftRequest({ application_id: 3 }),
-    { ok: true, value: { applicationId: 3, searchResultId: null, language: null } })
+test('request: exactly one of application_id / search_result_id, and a language I picked (no automatic)', () => {
+  assert.deepEqual(validateDraftRequest({ application_id: 3, language: 'hu' }),
+    { ok: true, value: { applicationId: 3, searchResultId: null, language: 'hu' } })
   assert.deepEqual(validateDraftRequest({ search_result_id: 9, language: 'sr' }),
     { ok: true, value: { applicationId: null, searchResultId: 9, language: 'sr' } })
-  for (const bad of [{}, { application_id: 1, search_result_id: 2 }, { application_id: '1' }, { application_id: 0 },
-    { application_id: 1, language: 'de' }, null]) {
+  assert.deepEqual(validateDraftRequest({ application_id: 3 }), { ok: false, error: 'Pick the language: hu, sr or en' })
+  for (const bad of [{}, { application_id: 1, search_result_id: 2, language: 'hu' }, { application_id: '1', language: 'hu' },
+    { application_id: 0, language: 'hu' }, { application_id: 1, language: 'de' }, { application_id: 1, language: null }, null]) {
     assert.equal(validateDraftRequest(bad).ok, false, JSON.stringify(bad))
   }
-})
-
-test('language: Hungarian company -> hu, with the reason', () => {
-  assert.deepEqual(chooseLanguage({ ...FACTS, city: 'Szeged' }), { language: 'hu', reason: 'magyar cég → magyar levél' })
-  assert.equal(chooseLanguage({ ...FACTS, city: 'Budapest, XI. kerület' }).language, 'hu')
-  assert.equal(chooseLanguage({ ...FACTS, url: 'https://www.profession.hu/allas/1' }).language, 'hu')
-})
-
-test('language: Serbian company -> sr for a Serbian posting, en otherwise', () => {
-  assert.equal(chooseLanguage({ ...FACTS, city: 'Szabadka', text: 'Tražimo programera, potrebno iskustvo sa PHP' }).language, 'sr')
-  assert.equal(chooseLanguage({ ...FACTS, city: 'Novi Sad', text: 'Junior PHP Developer. We offer...' }).language, 'en')
-  assert.equal(chooseLanguage({ ...FACTS, city: 'Beograd', text: 'Програмер' }).language, 'sr')
-})
-
-test('language: remote, international or unknown -> en; my choice and the application win', () => {
-  assert.equal(chooseLanguage({ ...FACTS, city: 'Szeged', remote: true }).language, 'en')
-  assert.equal(chooseLanguage({ ...FACTS, city: 'Remote' }).language, 'en')
-  assert.equal(chooseLanguage({ ...FACTS, city: 'Wien' }).reason, 'ismeretlen ország → angol levél')
-  assert.equal(chooseLanguage({ ...FACTS, city: 'Szeged', applicationLanguage: 'en' }).language, 'en')
-  assert.deepEqual(chooseLanguage({ ...FACTS, city: 'Szeged', applicationLanguage: 'en', chosen: 'sr' }),
-    { language: 'sr', reason: 'kézzel választva' })
-})
-
-test('country and Serbian detection helpers', () => {
-  assert.equal(countryOf('Újvidék', null), 'RS')
-  assert.equal(countryOf(null, 'https://joberty.rs/x'), 'RS')
-  assert.equal(countryOf('Wien', 'not a url'), '')
-  assert.equal(looksSerbian('Junior Developer, we offer remote work'), false)
-  assert.equal(looksSerbian('Nudimo rad u timu'), true)
 })
 
 test('CV: Hungarian letter -> Hungarian CV, otherwise English', () => {
@@ -58,6 +29,7 @@ test('CV: Hungarian letter -> Hungarian CV, otherwise English', () => {
 })
 
 test('fill: placeholders replaced, an empty tailored line leaves no gap', () => {
+  assert.equal(fillTemplate('Tools: {skills}.', { skills: 'PHP és SQL' }), 'Tools: PHP és SQL.')
   const body = 'Dear Team,\n\nI apply at {company} for {position}. {tailored_line} My CV is attached.\n\nBest regards,'
   assert.equal(fillTemplate(body, { company: 'Acme', position: 'Junior Dev', tailored_line: 'I know PHP.' }),
     'Dear Team,\n\nI apply at Acme for Junior Dev. I know PHP. My CV is attached.\n\nBest regards,')
@@ -83,6 +55,7 @@ test('the model line becomes exactly one sentence, max 300 characters, no braces
 test('rule-based line from the match reasons when Claude is not available', () => {
   const skills = matchedSkills(['+ PHP (3)', '+ MySQL (2)', '- not in my skills: Java', '+ junior', '+ SQL (2) for MySQL'])
   assert.deepEqual(skills, ['PHP', 'MySQL', 'SQL'])
+  assert.deepEqual(matchedSkills(['+ PHP (3)', '+ PHP (3)', '+ C# (2)'], 4), ['PHP', 'C#'])
   assert.equal(fallbackLine('en', ['PHP', 'MySQL']), 'I already have hands-on experience with PHP and MySQL, which the posting asks for.')
   assert.match(fallbackLine('hu', ['PHP']), /^A hirdetésben kért PHP terén/)
   assert.equal(fallbackLine('sr', []), '')
@@ -92,9 +65,12 @@ test('the committed templates: valid placeholders and at most 5 sentences each',
   const sql = readFileSync(new URL('../../../sql/letter_templates_template.sql', import.meta.url), 'utf-8')
   const rows = [...sql.matchAll(/\('(hu|sr|en)', '(posting|open)', '([^']*)',\n'([^']*)'\)/g)]
   assert.equal(rows.length, 6)
+  assert.equal(/<[A-Z_]+>/.test(sql), false, 'no <...> left to fill in: the file runs as is')
   for (const [, language, kind, subject, body] of rows) {
-    const filled = body.replace(/<SKILLS_\w+>/g, 'PHP')
+    const filled = body
     assert.deepEqual(unknownPlaceholders(subject + filled), [], `${language}/${kind}`)
+    assert.ok(filled.includes('{skills}'), `${language}/${kind} lists the matching skills`)
+    assert.equal(filled.includes('A(z)'), false, `${language}/${kind}: no "A(z)"`)
     assert.ok(filled.includes('{tailored_line}'), `${language}/${kind} has the tailored line`)
     assert.ok(templateSentences(filled) <= MAX_SENTENCES, `${language}/${kind}: ${templateSentences(filled)}`)
     assert.equal(kind === 'posting', filled.includes('{position}') || subject.includes('{position}'))
@@ -118,4 +94,53 @@ test('contact: only a real e-mail address becomes a mailto recipient', () => {
   assert.equal(isEmail('karrier@acme.hu'), true)
   assert.equal(isEmail('https://acme.hu/karrier'), false)
   assert.equal(isEmail(null), false)
+})
+
+// --- after the first real letter -------------------------------------------------------------
+
+test('Hungarian article by the first sound: a/az, acronyms by letter name, numbers as read', () => {
+  for (const word of ['Endava', 'IT Labs', 'Ericsson', 'Ügyfélszolgálat', 'SQL fejlesztő', 'MSZ', 'NNG', 'Office',
+    'Ősz Kft.', '5G', '1 Click', '1000 Kft']) {
+    assert.equal(hungarianArticle(word), 'az', word)
+  }
+  for (const word of ['Junior PHP Developer', 'PHP fejlesztő', 'Nordeus', 'C# fejlesztő', 'Yettel', 'BME', '3D', '10 Kft', '']) {
+    assert.equal(hungarianArticle(word), 'a', word)
+  }
+})
+
+test('Hungarian template: "A(z)" / "a" / "az" before a placeholder become the right article', () => {
+  const values = { company: 'Endava', position: 'Junior PHP Developer' }
+  assert.equal(fixHungarianArticles('A(z) {position} pozícióra, a {company} csapatába', values),
+    'A {position} pozícióra, az {company} csapatába')
+  assert.equal(fixHungarianArticles('az {company}, A {company}', { company: 'Nordeus' }), 'a {company}, A {company}')
+  const letter = fillTemplate('A(z) {position} pozícióra jelentkezem a {company} csapatába.', values, 'hu')
+  assert.equal(letter, 'A Junior PHP Developer pozícióra jelentkezem az Endava csapatába.')
+  assert.equal(letter.includes('A(z)'), false)
+  // English and Serbian templates are left alone; "Az önéletrajzomat" (no placeholder) too.
+  assert.equal(fillTemplate('a {company}', values, 'en'), 'a Endava')
+  assert.equal(fillTemplate('Az önéletrajzomat csatoltam.', values, 'hu'), 'Az önéletrajzomat csatoltam.')
+})
+
+test('skills: the ones the posting matched first, then my strongest, max 4, only my profile names', () => {
+  const mine = { 'C#': 3, '.NET': 3, PHP: 3, MySQL: 2, React: 2, Git: 2 }
+  assert.deepEqual(skillsForLetter(['+ MySQL (2)', '+ React (2)', '- not in my skills: Java'], mine),
+    ['MySQL', 'React', 'C#', '.NET'])
+  assert.deepEqual(skillsForLetter(['+ Kotlin (3)'], mine), ['C#', '.NET', 'PHP', 'MySQL'])   // not mine: ignored
+  assert.deepEqual(skillsForLetter([], {}), [])
+  assert.equal(joinSkills(['C#', 'PHP', 'MySQL'], 'hu'), 'C#, PHP és MySQL')
+  assert.equal(joinSkills(['C#', 'PHP'], 'sr'), 'C# i PHP')
+  assert.equal(joinSkills(['C#'], 'en'), 'C#')
+})
+
+test('language check: a line in another language is caught, names-only lines pass', () => {
+  assert.equal(wrongLanguage('A PHP és MySQL tapasztalatom jól illik a csapatotok munkájához.', 'hu'), false)
+  assert.equal(wrongLanguage('My PHP and MySQL experience fits the work of your team.', 'hu'), true)
+  assert.equal(wrongLanguage('Imam iskustva sa PHP i MySQL, koje su važne za vaš tim.', 'sr'), false)
+  assert.equal(wrongLanguage('A PHP és MySQL tapasztalatom jól illik a csapathoz.', 'sr'), true)
+  assert.equal(wrongLanguage('I have already worked with PHP and MySQL.', 'en'), false)
+  assert.equal(wrongLanguage('Već imam iskustva sa PHP-om.', 'en'), true)
+  assert.equal(wrongLanguage('PHP, MySQL, Docker.', 'hu'), false)
+  assert.ok(languageScores('Програмер').sr > 0)
+  assert.match(wrongLanguageMessage('sr'), /Serbian \(Latin script\) only/)
+  assert.match(SYSTEM_PROMPT, /ONLY in the requested language/)
 })

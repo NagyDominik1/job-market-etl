@@ -6,7 +6,6 @@ Edge Function (service_role) reads what it needs and logs drafts. They need
 PostgreSQL and run in a temporary schema (db_conn fixture, conftest.py).
 """
 
-import re
 from pathlib import Path
 
 import psycopg
@@ -99,8 +98,9 @@ def test_a_draft_survives_its_application(conn):
     assert conn.execute("SELECT application_id FROM letter_drafts").fetchone() == (None,)
 
 
-def test_template_file_is_valid_sql_once_filled_in(conn):
-    sql = re.sub(r"<SKILLS_\w+>", "PHP", TEMPLATE_SQL.read_text(encoding="utf-8"))
+def test_template_file_runs_as_is(conn):
+    # Nothing to fill in since the skills became the {skills} placeholder.
+    sql = TEMPLATE_SQL.read_text(encoding="utf-8")
     conn.execute(sql)
     conn.execute(sql)   # again: updates the same six rows
     assert conn.execute("SELECT count(*) FROM letter_templates").fetchone() == (6,)

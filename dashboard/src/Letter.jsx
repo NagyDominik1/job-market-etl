@@ -10,6 +10,9 @@ import './letters.css'
 // CV and the contact. I always send it myself: "Másolás" copies the text,
 // "Megnyitás levelezőben" opens my mail program with it (mailto:). Nothing is
 // sent automatically. The text can be edited here before copying.
+// The language is always my choice (no automatic guess): the button is
+// disabled until hu / sr / en is picked; an application's saved language is
+// pre-selected.
 
 // Errors from functions.invoke(): our JSON {error} or a plain status.
 async function describeLetterError(error) {
@@ -29,8 +32,8 @@ function mailtoHref(draft, subject, body) {
 }
 
 // target: { application_id } or { search_result_id }
-function LetterPanel({ target }) {
-  const [language, setLanguage] = useState('') // '' = decided by the rules
+function LetterPanel({ target, defaultLanguage }) {
+  const [language, setLanguage] = useState(LANGUAGE_LABELS[defaultLanguage] ? defaultLanguage : '') // '' = not picked yet
   const [draft, setDraft] = useState(null)
   const [subject, setSubject] = useState('')
   const [body, setBody] = useState('')
@@ -43,7 +46,7 @@ function LetterPanel({ target }) {
     setError(null)
     setCopied(false)
     const { data, error: invokeError } = await supabase.functions.invoke('draft-letter', {
-      body: { ...target, ...(chosen ? { language: chosen } : {}) },
+      body: { ...target, language: chosen },
     })
     if (invokeError) {
       setError(await describeLetterError(invokeError))
@@ -74,13 +77,13 @@ function LetterPanel({ target }) {
         <label>
           Nyelv
           <select value={language} onChange={(e) => setLanguage(e.target.value)}>
-            <option value="">automatikus</option>
+            <option value="" disabled>válassz…</option>
             {Object.entries(LANGUAGE_LABELS).map(([value, label]) => (
               <option key={value} value={value}>{label}</option>
             ))}
           </select>
         </label>
-        <button type="button" onClick={() => generate(language)} disabled={busy}>
+        <button type="button" onClick={() => generate(language)} disabled={busy || !language}>
           {busy ? 'Írás…' : draft ? 'Újraírás' : 'Levél írása'}
         </button>
       </div>
@@ -89,9 +92,10 @@ function LetterPanel({ target }) {
       {draft && (
         <>
           <p className="letter-meta">
-            {LANGUAGE_LABELS[draft.language]} levél ({draft.language_reason}) · Önéletrajz:{' '}
+            {LANGUAGE_LABELS[draft.language]} levél · Önéletrajz:{' '}
             <strong>{draft.cv_variant === 'hu' ? 'magyar' : 'angol'}</strong>
-            {draft.line_by === 'rules' && ' · a személyre szabott mondat szabály alapján készült (Claude nem volt elérhető)'}
+            {draft.line_by === 'rules' &&
+              ' · a személyre szabott mondat a sablon szabálya szerint készült (Claude nem volt elérhető, vagy nem a választott nyelven írt)'}
           </p>
           <p className="letter-meta">
             Kapcsolat:{' '}
@@ -119,14 +123,14 @@ function LetterPanel({ target }) {
   )
 }
 
-export default function LetterButton({ target }) {
+export default function LetterButton({ target, defaultLanguage = null }) {
   const [open, setOpen] = useState(false)
   return (
     <>
       <button type="button" className="link" onClick={() => setOpen(!open)}>
         {open ? 'Levél elrejtése' : 'Levél'}
       </button>
-      {open && <LetterPanel target={target} />}
+      {open && <LetterPanel target={target} defaultLanguage={defaultLanguage} />}
     </>
   )
 }
