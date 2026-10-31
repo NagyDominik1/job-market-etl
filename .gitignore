@@ -26,3 +26,6 @@ config/profile.yaml
 
 # The filled-in search_profile SQL (my real profile); the template is committed.
 sql/search_profile_local.sql
+
+# The filled-in letter templates (my real skills); the template is committed.
+sql/letter_templates_local.sql

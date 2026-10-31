@@ -1,0 +1,76 @@
+/* "Levél" panel and the "Sablonok" editor (Phase 9.5). */
+.letter-panel {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.letter-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.letter-controls label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+}
+
+.letter-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.letter-field {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+}
+
+.letter-field textarea,
+.template-card textarea {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem;
+}
+
+/* A link that looks like a secondary button (mailto: must be a link, not a button). */
+a.button {
+  display: inline-block;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+a.button.secondary {
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+
+.template-card {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.template-card h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.template-help {
+  margin: 0 1rem 1rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* Inside a row of links the panel takes the full width. */
+.card-links .letter-panel {
+  flex-basis: 100%;
+}

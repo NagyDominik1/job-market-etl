@@ -4,11 +4,12 @@ import Login from './Login.jsx'
 import JobFeed from './JobFeed.jsx'
 import SearchTab from './SearchTab.jsx'
 import TrackerTab from './TrackerTab.jsx'
+import TemplatesTab from './TemplatesTab.jsx'
 
 export default function App() {
   // undefined = still checking, null = logged out, object = logged in
   const [session, setSession] = useState(undefined)
-  const [tab, setTab] = useState('feed') // 'feed' | 'search' | 'tracker'
+  const [tab, setTab] = useState('feed') // 'feed' | 'search' | 'tracker' | 'templates'
 
   useEffect(() => {
     if (configError) return
@@ -34,10 +35,14 @@ export default function App() {
         <button className={tab === 'tracker' ? '' : 'secondary'} onClick={() => setTab('tracker')}>
           Jelentkezéseim
         </button>
+        <button className={tab === 'templates' ? '' : 'secondary'} onClick={() => setTab('templates')}>
+          Sablonok
+        </button>
       </nav>
       {tab === 'feed' && <JobFeed session={session} />}
       {tab === 'search' && <SearchTab session={session} />}
       {tab === 'tracker' && <TrackerTab session={session} />}
+      {tab === 'templates' && <TemplatesTab session={session} />}
     </>
   )
 }

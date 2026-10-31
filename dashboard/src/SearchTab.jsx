@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from './supabase.js'
 import AddToApplications from './AddToApplications.jsx'
+import LetterButton from './Letter.jsx'
 import { safeHref, useAppliedCompanyKeys } from './applications.js'
 import './search.css'
 
@@ -200,6 +201,9 @@ function ResultCard({ result, applied }) {
           deadline: result.deadline,
         }}
       />
+      <div className="card-links">
+        <LetterButton target={{ search_result_id: result.id }} />
+      </div>
     </article>
   )
 }

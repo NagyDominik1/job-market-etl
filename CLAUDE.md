@@ -49,6 +49,12 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 - Tracker write access (011/012): authenticated may INSERT/UPDATE applications (only the
   columns typed in: company_name, position, city, language, cv_variant, job_id, posting_url
   (http(s) CHECK), deadline, notes) and INSERT application_events; no DELETE anywhere
+- job_applied view (014, security_invoker): job_id of jobs at a company I applied to
+- search_runs.failed_chunks / retried_chunks (015) + claim_search_chunk_retry()
+- letter_templates (016; language hu/sr/en, kind posting/open, subject, body with {company}
+  {position} {tailored_line}, UNIQUE (language, kind); authenticated SELECT, INSERT, UPDATE
+  of subject/body only, no DELETE) and letter_drafts (016; cost log of draft-letter: language,
+  kind, cv_variant, status, tokens; authenticated read-only, written by the Edge Function)
 
 ## Decisions
 - Simple SQL migrations instead of Alembic/SQLAlchemy: numbered plain .sql files in
@@ -244,6 +250,22 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   Adding an application fires a browser event, so both tabs ask again.
 - Jelentkezéseim order: "Legújabb elöl" (default) = applied_at desc with not-yet-sent ones
   first, then created_at desc; or "Következő teendő szerint" (next_action_date).
+- Letters (9.5): Edge Function "draft-letter" (claude-haiku-5-5, no web tools, verify_jwt,
+  same login check as search) gets {application_id} or {search_result_id}. Plain rules
+  decide (letter.ts): language = my choice > the application's language > Hungarian city or
+  .hu link: hu > Serbian city or .rs link: sr if the posting text looks Serbian (Cyrillic,
+  č/ć/š/ž/đ, typical words), else en > remote/unknown: en; CV = hu for a hu letter, else en;
+  kind = posting if there is a position, else open. Claude writes only ONE sentence
+  ({tailored_line}, structured output, effort low) from the posting text and match reasons;
+  the code keeps its first sentence. If Claude fails, a rule-based line from the matched
+  skills is used (line_by = rules), so a letter always comes back. Max 5 sentences (greeting
+  and closing lines don't count), checked by the function and by the Sablonok editor (a JS
+  copy of the rule). Contact = the newest company-search contact for the same company_key.
+  Max 30 letters per hour (a simple count, a cost cap). The letter is only shown: "Másolás"
+  and "Megnyitás levelezőben" (mailto:); nothing is ever sent by the system.
+- My templates are not in git: sql/letter_templates_template.sql (placeholders) is committed,
+  sql/letter_templates_local.sql (generated from profile.yaml, my skills) is gitignored and run
+  by me. No name/phone in the templates: the e-mail signature adds them.
 
 ## Known limitations
 - The same job posted with a Hungarian and a Serbian (or English) title is NOT matched
@@ -327,5 +349,6 @@ Localhost magic-link login still redirects to Vercel (emailRedirectTo now ends i
 check the Supabase email template and Redirect URLs).
 Phase 9.4 merged into main (2026-10-30): migrations 011 + 012 applied to Supabase;
 Jelentkezéseim tab; search budget 12 searches + 12 fetches (function version 9).
-Next: 9.5 (draft-letter).
+Phase 9.5 on branch phase-9-5-letters (2026-10-31): migrations 014-016, search function
+(Serbian budget, retry, aliases), Edge Function draft-letter, Levél + Sablonok on the dashboard.
 Open phases: 4 (Gmail IMAP), 5 (ATS), 6 (report).

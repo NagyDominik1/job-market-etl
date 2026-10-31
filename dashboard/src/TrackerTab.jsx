@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { supabase } from './supabase.js'
 import { cleanSearch, useDebounced } from './JobFeed.jsx'
+import LetterButton from './Letter.jsx'
 import {
   EVENT_BUTTONS, EVENT_LABELS, STATUS_LABELS,
   addEvent, createApplication, describeError, findDuplicates, formatDate, safeHref,
@@ -269,6 +270,7 @@ function ApplicationCard({ app, onChanged }) {
       <div className="card-links">
         <button className="link" onClick={() => setOpen(!open)}>{open ? 'Előzmények elrejtése' : 'Előzmények'}</button>
         <button className="link" onClick={() => setEditing(!editing)}>Adatok szerkesztése</button>
+        <LetterButton target={{ application_id: app.id }} />
       </div>
       {editing && <ApplicationForm initial={toForm(app)} submitLabel="Mentés" onSubmit={saveEdit} onCancel={() => setEditing(false)} />}
       {open && <History applicationId={app.id} version={version} />}
