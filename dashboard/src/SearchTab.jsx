@@ -193,6 +193,10 @@ function ResultCard({ result, applied }) {
           ))}
         </ul>
       )}
+      {result.requirements?.length > 0 && (
+        <p className="requirements">Fő követelmények: {result.requirements.join(' · ')}</p>
+      )}
+      {result.company_summary && <p className="company-summary">{result.company_summary}</p>}
       {(result.deadline || contact) && (
         <footer className="card-foot">
           {result.deadline && <span>Határidő: {new Date(result.deadline).toLocaleDateString('hu-HU')}</span>}
@@ -211,6 +215,10 @@ function ResultCard({ result, applied }) {
           city: result.city,
           posting_url: href ?? safeHref(result.contact),
           deadline: result.deadline,
+          // 9.5: what the letter can refer to; NULL (not []) when the posting
+          // was not opened, so draft-letter may still open it once later.
+          requirements: result.requirements?.length ? result.requirements : null,
+          company_summary: result.company_summary ?? null,
         }}
       />
       <div className="card-links">

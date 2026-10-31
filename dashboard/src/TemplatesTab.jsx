@@ -108,8 +108,8 @@ export default function TemplatesTab({ session }) {
 
       <p className="template-help">
         Helyőrzők: {PLACEHOLDERS.map((name) => `{${name}}`).join(', ')}. A {'{skills}'} helyére a tudásod kerül (a
-        hirdetésben kértek elöl, legfeljebb 4), a {'{tailored_line}'} helyére egy, a hirdetéshez írt mondat a levél
-        nyelvén. Magyarul írd így: „a {'{company}'}”, „A {'{position}'}”: a/az a szó alapján automatikus. Legfeljebb{' '}
+        hirdetésben kértek elöl, legfeljebb 4), a {'{tailored_line}'} helyére 1-2, a hirdetés követelményeit a valós
+        projektjeiddel összekötő mondat a levél nyelvén (ha így 5 mondat fölé menne, csak az első marad). Magyarul írd így: „a {'{company}'}”, „A {'{position}'}”: a/az a szó alapján automatikus. Legfeljebb{' '}
         {MAX_SENTENCES} mondat; a megszólítás és az elköszönés nem számít. Név és telefonszám helyett az e-mail
         aláírásod kerül a végére.
       </p>

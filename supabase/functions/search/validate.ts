@@ -40,6 +40,8 @@ export interface SearchResult {
   contact: string | null
   reasons: string[]
   score: number
+  requirements: string[] // 9.5: key requirements of an opened posting (017)
+  company_summary: string | null // one short sentence about the company
 }
 
 type Ok<T> = { ok: true; value: T }
@@ -94,6 +96,22 @@ function stringList(value: unknown, maxItems: number, maxLength: number): string
   if (!Array.isArray(value)) return null
   const items = value.map((item) => cleanText(item, maxLength)).filter((item) => item !== '')
   return [...new Set(items)].slice(0, maxItems)
+}
+
+export const MAX_REQUIREMENTS = 5
+
+/**
+ * The posting facts a letter can use (9.5): at most 5 short requirement
+ * phrases and ONE short sentence about the company. Web text, so cleaned and
+ * cut like every other field. (draft-letter/letter.ts has the same rule for
+ * the facts it extracts itself.)
+ */
+export function postingFacts(requirements: unknown, summary: unknown): { requirements: string[]; company_summary: string | null } {
+  const sentence = cleanText(summary, 300)
+  return {
+    requirements: stringList(Array.isArray(requirements) ? requirements : [], MAX_REQUIREMENTS, 120) ?? [],
+    company_summary: (sentence.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? sentence) || null,
+  }
 }
 
 // --- the request ------------------------------------------------------------------------
@@ -599,6 +617,8 @@ export function validateResults(
     const score = agency ? Math.max(0, scored.score - AGENCY_PENALTY) : scored.score
     const reasons = [...(listing ? [LISTING_REASON] : []), ...(agency ? [AGENCY_REASON] : []), ...scored.reasons]
     if (listing) fromListings++
+    // Requirements only from a posting Claude opened; a company gets its summary only.
+    const facts = postingFacts(mode === 'jobs' && !listing ? item.requirements : [], listing ? '' : item.company_summary)
     results.push({
       kind: mode === 'jobs' ? 'job' : 'company',
       title: title || null,
@@ -610,6 +630,7 @@ export function validateResults(
       contact: careersContact,
       reasons: reasons.slice(0, 8),
       score,
+      ...facts,
     })
   }
   return done()

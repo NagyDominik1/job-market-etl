@@ -271,6 +271,20 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 - Templates: sql/letter_templates_template.sql runs as it is (nothing personal since the skills
   became {skills}; the earlier gitignored letter_templates_local.sql is gone). No name/phone in
   the templates: the e-mail signature adds them.
+- Tailored letters (9.5, migration 017): the search returns, for every posting Claude opened,
+  3-5 key requirements and one company sentence (search_results.requirements /
+  company_summary; none for list-page postings, which were not read). "Hozzáadom" copies them
+  to the application (column-level INSERT grant; the dashboard can't edit them). draft-letter
+  uses them; an application without them (NULL) but with a posting_url gets ONE web_fetch of
+  that page (linkedin.com blocked, 8000 tokens, strict submit_posting_facts tool) and the
+  result is saved (service_role UPDATE of those two columns only), '{}' when the page had
+  none, so it is never fetched twice; a failed fetch saves nothing. The tailored part is 1-2
+  sentences connecting the requirements to my REAL projects (search_profile.projects, real
+  values only in the gitignored sql/search_profile_local.sql). Checked in code: chosen
+  language, no years/seniority claims, at least one listed project named; else asked once
+  more, then a rule-based sentence about the best-fitting project (whole-word skill match;
+  Serbian without gendered verbs). Two sentences that would make the letter longer than 5:
+  only the first is kept.
 - Search, employer names (after run 11): company_name must be the employer named in the
   posting (prompt + schema description). The code drops results whose "company" is a job
   board (Jooble, profession.hu...), a job-site category or a placeholder ("Unclassified",

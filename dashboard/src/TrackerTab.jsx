@@ -257,6 +257,8 @@ function ApplicationCard({ app, onChanged }) {
         )}
       </p>
       {app.notes && <p className="notes">{app.notes}</p>}
+      {app.requirements?.length > 0 && <p className="requirements">Fő követelmények: {app.requirements.join(' · ')}</p>}
+      {app.company_summary && <p className="company-summary">{app.company_summary}</p>}
 
       <div className="event-buttons">
         {EVENT_BUTTONS.map((button) => (

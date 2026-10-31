@@ -7,7 +7,8 @@ import {
   LINE_SCHEMA, MAX_SENTENCES, MODEL, SYSTEM_PROMPT, buildLinePrompt, countSentences, fallbackLine, fillTemplate,
   fixHungarianArticles, hungarianArticle, isEmail, joinSkills, languageScores, matchedSkills, oneSentence,
   skillsForLetter, suggestCv, templateSentences, unknownPlaceholders, validateDraftRequest, wrongLanguage,
-  wrongLanguageMessage,
+  wrongLanguageMessage, FACTS_TOOL, bestProject, canFetch, cleanFacts, factsPrompt, firstSentences, lineProblem,
+  parseProjects, postingFetchTool, problemMessage, projectSentence,
 } from './letter.ts'
 
 test('request: exactly one of application_id / search_result_id, and a language I picked (no automatic)', () => {
@@ -143,4 +144,92 @@ test('language check: a line in another language is caught, names-only lines pas
   assert.ok(languageScores('Програмер').sr > 0)
   assert.match(wrongLanguageMessage('sr'), /Serbian \(Latin script\) only/)
   assert.match(SYSTEM_PROMPT, /ONLY in the requested language/)
+})
+
+// --- 9.5: tailored to the posting and to my real projects ---------------------------------------
+
+const PROJECTS = parseProjects([
+  { name: 'Personal Trainer', kind: 'project', skills: ['PHP', 'MySQL', 'REST API'] },
+  { name: 'Voyager Unit', kind: 'project', skills: ['C#', 'Unity'] },
+  { name: 'job-market-etl', kind: 'project', skills: ['Python', 'PostgreSQL', 'Docker'] },
+  { name: 'Studio Present', kind: 'internship', skills: ['React'] },
+  { name: '', skills: ['x'] }, 'nonsense', { name: 'No skills' },
+])
+
+test('projects from the profile: cleaned, malformed ones skipped, kind defaults to project', () => {
+  assert.deepEqual(PROJECTS.map((p) => p.name), ['Personal Trainer', 'Voyager Unit', 'job-market-etl', 'Studio Present', 'No skills'])
+  assert.equal(PROJECTS[3].kind, 'internship')
+  assert.deepEqual(PROJECTS[4], { name: 'No skills', kind: 'project', skills: [] })
+  assert.deepEqual(parseProjects(null), [])
+})
+
+test('posting facts: max 5 short requirements, one company sentence, control characters removed', () => {
+  const facts = cleanFacts(['PHP 8', 'PHP 8', 'REST', 'SQL', 'Git', 'Docker', 'English'], 'We build fintech apps. Join us!\u0007')
+  assert.deepEqual(facts, { requirements: ['PHP 8', 'REST', 'SQL', 'Git', 'Docker'], companySummary: 'We build fintech apps.' })
+  assert.deepEqual(cleanFacts('not a list', 42), { requirements: [], companySummary: null })
+  assert.equal(cleanFacts(['x'.repeat(500)], '').requirements[0].length, 120)
+})
+
+test('posting fetch: only http(s), never linkedin.com, one page, 8000 tokens, strict facts tool', () => {
+  assert.equal(canFetch('https://acme.hu/karrier/junior-php'), true)
+  assert.equal(canFetch('https://www.linkedin.com/jobs/view/1'), false)
+  assert.equal(canFetch('https://hu.linkedin.com/jobs/view/1'), false)
+  assert.equal(canFetch('javascript:alert(1)'), false)
+  assert.equal(canFetch(null), false)
+  const tool = postingFetchTool()
+  assert.deepEqual([tool.max_uses, tool.max_content_tokens, tool.blocked_domains], [1, 8000, ['linkedin.com']])
+  assert.equal(FACTS_TOOL.strict, true)
+  assert.deepEqual(FACTS_TOOL.input_schema.required, ['requirements', 'company_summary'])
+  assert.match(factsPrompt('https://acme.hu/job/1'), /https:\/\/acme\.hu\/job\/1/)
+})
+
+test('the tailored part: at most 2 sentences', () => {
+  assert.equal(firstSentences('One. Two! Three?', 2), 'One. Two!')
+  assert.equal(firstSentences('No full stop', 2), 'No full stop.')
+  assert.equal(firstSentences(null, 2), '')
+})
+
+test('line checks: wrong language, invented experience, no real project named', () => {
+  const good = 'A Personal Trainer projektemben PHP és MySQL alapú REST API-t építettem, ami illik a hirdetéshez.'
+  assert.equal(lineProblem(good, 'hu', PROJECTS), null)
+  assert.equal(lineProblem('In my Personal Trainer project I built a REST API with PHP.', 'hu', PROJECTS), 'language')
+  assert.equal(lineProblem('I have 3 years of PHP experience from my Personal Trainer project.', 'en', PROJECTS), 'invented')
+  assert.equal(lineProblem('Három éves tapasztalatom van PHP terén a Personal Trainer projektben.', 'hu', PROJECTS), 'invented')
+  assert.equal(lineProblem('As a senior developer I know the Voyager Unit codebase.', 'en', PROJECTS), 'invented')
+  assert.equal(lineProblem('I have worked with PHP and MySQL in many projects.', 'en', PROJECTS), 'ungrounded')
+  assert.equal(lineProblem('I have worked with PHP and MySQL.', 'en', []), null)   // no projects listed: nothing to name
+  assert.match(problemMessage('ungrounded', 'en'), /listed projects/)
+  assert.match(problemMessage('invented', 'sr'), /Serbian/)
+})
+
+test('best project: by the posting skills and requirements, whole words only', () => {
+  assert.equal(bestProject(PROJECTS, ['PHP', 'MySQL'])?.name, 'Personal Trainer')
+  assert.equal(bestProject(PROJECTS, [], ['Python 3', 'Docker, Kubernetes'])?.name, 'job-market-etl')
+  assert.equal(bestProject(PROJECTS, [], ['strong community skills'])?.name, undefined)   // not "Unity"
+  assert.equal(bestProject(PROJECTS, [], ['React.js'])?.name, 'Studio Present')
+})
+
+test('project sentences: real names only, Hungarian article, Serbian without gendered verbs', () => {
+  assert.equal(projectSentence('hu', PROJECTS[0]), 'A Personal Trainer projektemben PHP, MySQL és REST API technológiákkal dolgoztam.')
+  assert.equal(projectSentence('hu', PROJECTS[3]), 'React gyakornokként dolgoztam a Studio Present cégnél.')
+  assert.equal(projectSentence('en', PROJECTS[1]), 'In my Voyager Unit project I worked with C# and Unity.')
+  assert.equal(projectSentence('sr', PROJECTS[2]), 'Moj projekat job-market-etl je urađen u Python, PostgreSQL i Docker.')
+  assert.doesNotMatch(projectSentence('sr', PROJECTS[0]) + projectSentence('sr', PROJECTS[3]), /radio|radila|koristio|koristila/)
+  assert.equal(fallbackLine('en', ['PHP'], PROJECTS), 'In my Personal Trainer project I worked with PHP, MySQL and REST API.')
+  assert.equal(fallbackLine('en', ['Kotlin'], PROJECTS), 'I already have hands-on experience with Kotlin, which the posting asks for.')
+  assert.equal(fallbackLine('hu', [], PROJECTS), '')
+})
+
+test('prompt: requirements, company sentence and the real projects, with the no-invention rules', () => {
+  const prompt = buildLinePrompt({
+    language: 'en', kind: 'posting', company: 'Acme', position: 'PHP Developer', city: null, reasons: [],
+    postingText: '', mySkills: { PHP: 3 }, requirements: ['PHP 8', 'REST APIs'], companySummary: 'Acme builds shops.',
+    projects: PROJECTS.slice(0, 4),
+  })
+  assert.match(prompt, /Key requirements of the posting: PHP 8; REST APIs/)
+  assert.match(prompt, /About the company: Acme builds shops\./)
+  assert.match(prompt, /Personal Trainer \(PHP, MySQL, REST API\); .*internship at Studio Present \(React\)/)
+  assert.match(SYSTEM_PROMPT, /never invent experience/)
+  assert.match(SYSTEM_PROMPT, /one or two sentences/)
+  assert.match(SYSTEM_PROMPT, /gendered/)
 })

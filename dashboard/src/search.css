@@ -88,3 +88,14 @@
 .badge.agency {
   background: var(--low);
 }
+
+/* 9.5: the posting's key requirements and one sentence about the company. */
+.requirements,
+.company-summary {
+  margin: 0.3rem 0;
+  font-size: 0.9rem;
+}
+
+.company-summary {
+  color: var(--muted);
+}

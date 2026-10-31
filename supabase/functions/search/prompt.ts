@@ -109,9 +109,22 @@ export const SUBMIT_RESULTS_TOOL = {
               type: 'string',
               description: 'source "listing": the URL of the list page you fetched, exactly as fetched; else empty string',
             },
+            // 9.5: what a letter can refer to. Only from a page Claude opened.
+            requirements: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Jobs, posting you opened: 3-5 key requirements as short phrases from the posting ' +
+                '(e.g. "PHP 8", "REST APIs", "English B2"). [] for list-page postings and companies',
+            },
+            company_summary: {
+              type: 'string',
+              description: 'One short sentence about the company from the page you opened (what it does); ' +
+                'empty string if the page says nothing about it or you did not open it',
+            },
           },
           required: ['title', 'company_name', 'city', 'remote', 'url', 'deadline', 'contact', 'skills',
-            'junior_friendly', 'seniority', 'years_required', 'confirmed', 'source', 'listing_url'],
+            'junior_friendly', 'seniority', 'years_required', 'confirmed', 'source', 'listing_url', 'requirements',
+            'company_summary'],
           additionalProperties: false,
         },
       },
@@ -345,11 +358,14 @@ How to work:
    the list pages you fetched, even ones that look like a poor fit (senior, many years, wrong
    city): our code filters them.
    - Posting page you opened: source "posting", confirmed: true, listing_url "". Fill
-     seniority and years_required exactly as the posting states.
+     seniority and years_required exactly as the posting states, requirements with its 3-5 key
+     requirements (short phrases, as the posting states them) and company_summary with one
+     short sentence about the company from that page.
    - Posting seen on a fetched list page: source "listing", listing_url = that list page's URL
      exactly as you fetched it, confirmed: false, url = the posting's OWN link from the list
      (absolute https URL, not the list page). Title, company and city as the list shows them;
-     seniority "unknown" and years_required 0 unless the list states them. At most ${budget.perListing}
+     seniority "unknown" and years_required 0 unless the list states them; requirements [] and
+     company_summary "" (you did not open the posting). At most ${budget.perListing}
      postings per list page: the ones that best match the search.
    - company_name is always the employer named in the posting (for an agency posting: the
      agency's own name). Never the job site (profession.hu, Jooble, HelloWorld...), a category
@@ -370,8 +386,9 @@ even without a current posting. Report facts only (our code ranks them):
 "url" = the company's careers page (or homepage); "contact" = the careers e-mail or the
 careers page URL; "skills" = their tech stack (up to 8); "junior_friendly" = true if they
 mention internships, junior roles, mentoring or an academy program. Only use contacts
-published by the company itself. Set source "posting", listing_url "", confirmed false,
-seniority "unknown", years_required 0, deadline "".`
+published by the company itself. "company_summary" = one short sentence about what the company
+does, from its own page. Set source "posting", listing_url "", confirmed false,
+seniority "unknown", years_required 0, deadline "", requirements [].`
 
 /** The user message for one run. `today` is YYYY-MM-DD (the model has no clock). */
 export function buildUserPrompt(

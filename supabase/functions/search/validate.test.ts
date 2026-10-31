@@ -9,7 +9,7 @@ import {
   FETCH_BLOCKED_DOMAINS, LISTING_REASON, MAX_PER_LISTING, MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker,
   domainStats, httpUrl, isFetchBlocked, isListingUrl, isoDate, normalizeUrl, rulesFromProfile, runCounts, validateAction,
   validateRequest, validateResults,
-  AGENCY_PENALTY, AGENCY_REASON, companyProblem, isAgency,
+  AGENCY_PENALTY, AGENCY_REASON, companyProblem, isAgency, postingFacts,
 } from './validate.ts'
 import {
   FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MAX_CHUNKS, MAX_FETCHES, MAX_SEARCHES, MIN_CANDIDATES, SUBMIT_RESULTS_TOOL,
@@ -741,4 +741,33 @@ test('agencies and marketplaces: marked (first reason) and scored lower, never a
 test('a listing agency result keeps both marks, the listing one first', () => {
   const { results } = validateResults({ results: [{ ...FROM_LIST, company_name: 'Turing' }] }, 'jobs', NO_RULES, null, [LIST_PAGE])
   assert.deepEqual(results[0].reasons.slice(0, 2), [LISTING_REASON, AGENCY_REASON])
+})
+
+// --- 9.5: posting facts for the letters ------------------------------------------------------------
+
+test('submit_results asks for requirements and a company sentence (strict: both required)', () => {
+  const items = SUBMIT_RESULTS_TOOL.input_schema.items ?? SUBMIT_RESULTS_TOOL.input_schema.properties.results.items
+  assert.ok(items.required.includes('requirements') && items.required.includes('company_summary'))
+  assert.match(buildUserPrompt('jobs', PARAMS, null, [], '2026-10-31'), /3-5 key\s+requirements/)
+})
+
+test('an opened posting keeps its requirements and company sentence; a list-page posting gets none', () => {
+  const opened = { ...GOOD_JOB, requirements: ['PHP 8', 'MySQL', 'REST', 'Git', 'English B2', 'Docker'],
+    company_summary: 'Acme builds web shops. We are hiring!' }
+  const { results } = validateResults({ results: [opened, { ...FROM_LIST, requirements: ['Java'], company_summary: 'Beta.' }] },
+    'jobs', NO_RULES, null, [LIST_PAGE])
+  const [posting, listed] = results.sort((a, b) => a.company_name.localeCompare(b.company_name))
+  assert.deepEqual(posting.requirements, ['PHP 8', 'MySQL', 'REST', 'Git', 'English B2'])
+  assert.equal(posting.company_summary, 'Acme builds web shops.')
+  assert.deepEqual(listed.requirements, [])
+  assert.equal(listed.company_summary, null)
+})
+
+test('companies: a summary, no requirements; facts are cleaned like any web text', () => {
+  const { results } = validateResults({ results: [{ ...GOOD_JOB, title: '', url: 'https://acme.example/careers',
+    requirements: ['x'], company_summary: '  Acme   makes\u0000 games  ' }] }, 'companies')
+  assert.deepEqual(results[0].requirements, [])
+  assert.equal(results[0].company_summary, 'Acme makes games')
+  assert.deepEqual(postingFacts(undefined, undefined), { requirements: [], company_summary: null })
+  assert.equal(postingFacts(['y'.repeat(300)], '').requirements[0].length, 120)
 })

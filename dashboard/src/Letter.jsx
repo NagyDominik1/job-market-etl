@@ -95,8 +95,14 @@ function LetterPanel({ target, defaultLanguage }) {
             {LANGUAGE_LABELS[draft.language]} levél · Önéletrajz:{' '}
             <strong>{draft.cv_variant === 'hu' ? 'magyar' : 'angol'}</strong>
             {draft.line_by === 'rules' &&
-              ' · a személyre szabott mondat a sablon szabálya szerint készült (Claude nem volt elérhető, vagy nem a választott nyelven írt)'}
+              ' · a személyre szabott rész a sablon szabálya szerint készült (Claude nem volt elérhető, vagy a válasza nem felelt meg: nyelv, kitalált tapasztalat, nem nevezett meg valós projektet)'}
           </p>
+          {draft.requirements?.length > 0 && (
+            <p className="letter-meta">
+              A hirdetés fő követelményei{draft.facts_by === 'fetched' ? ' (most kiolvasva a hirdetésből, elmentve)' : ''}:{' '}
+              {draft.requirements.join(' · ')}
+            </p>
+          )}
           <p className="letter-meta">
             Kapcsolat:{' '}
             {contactHref ? (

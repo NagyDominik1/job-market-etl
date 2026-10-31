@@ -5,7 +5,7 @@
 --
 -- Running it again updates the row (ON CONFLICT), so it also works for changes.
 
-INSERT INTO search_profile (skills, seniority, cities, languages, preferred_roles, dealbreakers)
+INSERT INTO search_profile (skills, seniority, cities, languages, preferred_roles, dealbreakers, projects)
 VALUES (
     -- skill -> level (1 = basics, 2 = used in a project, 3 = confident)
     '{"<SKILL_1>": 3, "<SKILL_2>": 2, "<SKILL_3>": 1}',
@@ -20,7 +20,11 @@ VALUES (
     -- same keys as dealbreakers in config/profile.yaml
     '{"title_keywords": ["<WORD_1>", "<WORD_2>"],
       "min_years_required": <NUMBER>,
-      "required_languages_missing": ["<LANGUAGE_I_DONT_SPEAK>"]}'
+      "required_languages_missing": ["<LANGUAGE_I_DONT_SPEAK>"]}',
+    -- my real projects (migration 017): the only experience a letter may mention.
+    -- kind: "project" (name = the project's name) or "internship" (name = the company)
+    '[{"name": "<PROJECT_1>", "kind": "project", "skills": ["<SKILL_1>", "<SKILL_2>"]},
+      {"name": "<COMPANY_OF_INTERNSHIP>", "kind": "internship", "skills": ["<SKILL_3>"]}]'
 )
 ON CONFLICT (id) DO UPDATE SET
     skills          = EXCLUDED.skills,
@@ -29,4 +33,5 @@ ON CONFLICT (id) DO UPDATE SET
     languages       = EXCLUDED.languages,
     preferred_roles = EXCLUDED.preferred_roles,
     dealbreakers    = EXCLUDED.dealbreakers,
+    projects        = EXCLUDED.projects,
     updated_at      = now();
