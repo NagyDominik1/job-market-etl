@@ -151,7 +151,7 @@ export function validateRequest(body: unknown): Ok<{ mode: Mode; params: SearchP
 /** One request to the function: start a run, or run one of its chunks (run 9). */
 export type Action =
   | { action: 'start'; mode: Mode; params: SearchParams }
-  | { action: 'chunk'; runId: number; chunk: number }
+  | { action: 'chunk' | 'retry'; runId: number; chunk: number }
 
 /**
  * {action: "start", mode, params} or {action: "chunk", run_id, chunk}. A body
@@ -162,15 +162,16 @@ export type Action =
 export function validateAction(body: unknown): Ok<Action> | Err {
   if (typeof body !== 'object' || body === null) return { ok: false, error: 'The body must be a JSON object' }
   const { action } = body as { action?: unknown }
-  if (action === 'chunk') {
+  // retry (9.5): a failed chunk once more, inside the same run (015).
+  if (action === 'chunk' || action === 'retry') {
     const { run_id: runId, chunk } = body as { run_id?: unknown; chunk?: unknown }
     if (!Number.isSafeInteger(runId) || (runId as number) <= 0) return { ok: false, error: 'run_id must be a positive integer' }
     if (!Number.isSafeInteger(chunk) || (chunk as number) < 0 || (chunk as number) > 100) {
       return { ok: false, error: 'chunk must be an integer from 0' }
     }
-    return { ok: true, value: { action: 'chunk', runId: runId as number, chunk: chunk as number } }
+    return { ok: true, value: { action, runId: runId as number, chunk: chunk as number } }
   }
-  if (action !== undefined && action !== 'start') return { ok: false, error: 'action must be "start" or "chunk"' }
+  if (action !== undefined && action !== 'start') return { ok: false, error: 'action must be "start", "chunk" or "retry"' }
   const request = validateRequest(body)
   return request.ok ? { ok: true, value: { action: 'start', ...request.value } } : request
 }
@@ -406,6 +407,7 @@ export function validateResults(
   today: string | null = null,
   fetchedUrls: string[] | null = null,
   scoring: ScoringContext = EMPTY_CONTEXT,
+  maxPerListing = MAX_PER_LISTING, // smaller for Serbian city chunks (prompt.ts SERBIAN_BUDGET)
 ): { results: SearchResult[]; candidates: number; fromListings: number; dropped: number; droppedBy: DroppedBy } {
   const droppedBy: DroppedBy = {
     invalid: 0, duplicate: 0, over_limit: 0, expired: 0, unconfirmed: 0, bad_url: 0, senior: 0, years: 0,
@@ -477,7 +479,7 @@ export function validateResults(
       }
       if (listing) {
         const taken = perListing.get(listingUrl!) ?? 0
-        if (taken >= MAX_PER_LISTING) {
+        if (taken >= maxPerListing) {
           droppedBy.over_limit++
           continue
         }

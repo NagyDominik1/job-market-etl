@@ -3,6 +3,7 @@
 //   node --test "supabase/functions/search/*.test.ts"
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   FETCH_BLOCKED_DOMAINS, LISTING_REASON, MAX_PER_LISTING, MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker,
@@ -12,8 +13,9 @@ import {
 import {
   FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MAX_CHUNKS, MAX_FETCHES, MAX_SEARCHES, MIN_CANDIDATES, SUBMIT_RESULTS_TOOL,
   SYSTEM_PROMPT, buildChunks, buildQueryPlan, buildUserPrompt, webFetchTool, webSearchTool,
+  DEFAULT_BUDGET, SERBIAN_BUDGET,
 } from './prompt.ts'
-import { fold, scoreCompany, scoreJob, scoringContext } from './score.ts'
+import { SKILL_ALIASES, canonicalSkill, fold, scoreCompany, scoreJob, scoringContext, skillAlternatives } from './score.ts'
 
 const PARAMS = { countries: ['HU'], cities: ['Szeged'], remote: false, roles: [], seniority: [], languages: [] }
 
@@ -621,4 +623,63 @@ test('scoring context: the form wins, the profile fills gaps, remote is the last
     { skills: { PHP: 3 }, seniority: ['junior'], cities: ['Szeged', 'remote'], roles: ['backend'] })
   assert.deepEqual(scoringContext({ cities: [], remote: false, roles: [], seniority: [] }, null),
     { skills: {}, seniority: [], cities: [], roles: [] })
+})
+
+// --- 9.5 B: Serbian budget, retry, skill aliases ---------------------------------------------------
+
+test('Serbian city chunks get a smaller budget (run 10: Subotica timed out), the others the default', () => {
+  const chunks = buildChunks(RUN6)
+  assert.deepEqual(chunks.map((c) => c.budget === SERBIAN_BUDGET), [false, true, true, true, false])
+  assert.deepEqual(SERBIAN_BUDGET, { searches: 3, fetches: 3, perListing: 5, fetchTokens: 5000 })
+  assert.equal(DEFAULT_BUDGET.searches, MAX_SEARCHES)
+  const countries = buildChunks({ ...RUN6, cities: [], remote: false })
+  assert.deepEqual(countries.map((c) => c.budget === SERBIAN_BUDGET), [false, true])
+  // The plan, the prompt and the fetch tool follow the chunk's budget.
+  const subotica = chunks[1]
+  const prompt = buildUserPrompt('jobs', subotica.params, null, [], '2026-10-31', subotica.budget)
+  assert.equal((prompt.match(/^\d+\. .*posao/gm) ?? []).length, 3) // the query plan lines
+  assert.match(prompt, /up to 3 pages/)
+  assert.match(prompt, /At most 5\s+postings per list page/)
+  assert.equal(webFetchTool(3, subotica.budget.fetchTokens).max_content_tokens, 5000)
+})
+
+test('the per-listing cap can be lowered per chunk', () => {
+  const many = Array.from({ length: 8 }, (_, i) => ({ ...FROM_LIST, title: `Job ${i}`, url: `https://www.profession.hu/allas/${i}` }))
+  const { results, droppedBy } = validateResults({ results: many }, 'jobs', NO_RULES, null, [LIST_PAGE], undefined, 5)
+  assert.equal(results.length, 5)
+  assert.equal(droppedBy.over_limit, 3)
+})
+
+test('requests: retry has the same shape as chunk', () => {
+  assert.deepEqual(validateAction({ action: 'retry', run_id: 7, chunk: 1 }), { ok: true, value: { action: 'retry', runId: 7, chunk: 1 } })
+  assert.equal(validateAction({ action: 'retry', run_id: 7 }).ok, false)
+})
+
+test('skill aliases: the same entries as src/vocabulary.py SKILL_ALIASES', () => {
+  const python = readFileSync(new URL('../../../src/vocabulary.py', import.meta.url), 'utf-8')
+  const block = python.slice(python.indexOf('SKILL_ALIASES = {'), python.indexOf('}', python.indexOf('SKILL_ALIASES = {')))
+  const entries = [...block.matchAll(/"([^"]+)": "([^"]+)"/g)]
+  assert.ok(entries.length > 40, 'parsed the Python list')
+  for (const [, key, value] of entries) assert.equal(SKILL_ALIASES[key], value, key)
+})
+
+test('skill aliases in the score: JS = JavaScript, postgres = PostgreSQL, HTML/CSS splits', () => {
+  assert.equal(canonicalSkill(' js '), 'JavaScript')
+  assert.equal(canonicalSkill('Rust'), 'Rust')
+  assert.deepEqual(skillAlternatives('HTML/CSS'), ['HTML', 'CSS'])
+  assert.deepEqual(skillAlternatives('CI/CD'), ['CI/CD'])
+  const ctx = { ...CTX, skills: { JavaScript: 2, 'HTML/CSS': 2, PostgreSQL: 1 } }
+  const { reasons } = scoreJob({ title: 'x', city: 'Szeged', remote: false, seniority: 'junior', skills: ['JS', 'html5', 'postgres'] }, ctx)
+  assert.deepEqual(reasons.slice(0, 3), ['+ JavaScript (2)', '+ HTML/CSS (2)', '+ PostgreSQL (1)'])
+})
+
+test('SQL family: MySQL counts for SQL and SQL for MySQL, and the reason says so', () => {
+  const sql = { ...CTX, skills: { SQL: 2 } }
+  const mysql = scoreJob({ title: 'x', city: '', remote: false, seniority: 'junior', skills: ['MySQL', 'mssql'] }, sql)
+  assert.deepEqual(mysql.reasons[0], '+ SQL (2) for MySQL')
+  assert.equal(mysql.reasons.some((r) => r.startsWith('- not in my skills')), false) // SQL Server: covered by SQL too
+  const reverse = scoreJob({ title: 'x', city: '', remote: false, seniority: 'junior', skills: ['SQL'] }, { ...CTX, skills: { MySQL: 3 } })
+  assert.equal(reverse.reasons[0], '+ MySQL (3) for SQL')
+  const none = scoreJob({ title: 'x', city: '', remote: false, seniority: 'junior', skills: ['MySQL'] }, { ...CTX, skills: { PHP: 3 } })
+  assert.equal(none.reasons[0], '- not in my skills: MySQL')
 })

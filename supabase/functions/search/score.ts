@@ -8,8 +8,10 @@
 //
 // Jobs (same weights as src/scoring.py): skills 40, seniority 25, city 20,
 // role 15. Companies: city 30, stack 30, junior-friendly 20, careers contact 20.
-// Simpler than the Python version: skills match by name (case-insensitive,
-// "HTML/CSS" counts for HTML and CSS), no vocabulary of aliases.
+// Skills match like the Python version (src/vocabulary.py): spelling aliases
+// ("JS" = JavaScript, "postgres" = PostgreSQL), "HTML/CSS" in my profile
+// counts for HTML and CSS. One addition the pipeline doesn't have (its files
+// stay unchanged): SQL dialects count for "SQL" and the other way round.
 // Pure (no Deno or npm imports), so it runs in the tests with Node.
 
 export interface ScoringContext {
@@ -48,23 +50,113 @@ function containsPhrase(text: string, phrase: string): boolean {
   return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'u').test(text)
 }
 
+// Common spelling variants -> one canonical name. The same entries as
+// SKILL_ALIASES in src/vocabulary.py (a test keeps them in sync), plus a few
+// SQL dialects for SQL_FAMILY. Keys are lowercase.
+export const SKILL_ALIASES: Record<string, string> = {
+  'python': 'Python',
+  'postgres': 'PostgreSQL',
+  'postgresql': 'PostgreSQL',
+  'sql': 'SQL',
+  'js': 'JavaScript',
+  'javascript': 'JavaScript',
+  'ts': 'TypeScript',
+  'typescript': 'TypeScript',
+  'react': 'React',
+  'reactjs': 'React',
+  'react.js': 'React',
+  'node': 'Node.js',
+  'nodejs': 'Node.js',
+  'node.js': 'Node.js',
+  'golang': 'Go',
+  'k8s': 'Kubernetes',
+  'kubernetes': 'Kubernetes',
+  'docker': 'Docker',
+  'aws': 'AWS',
+  'amazon web services': 'AWS',
+  'gcp': 'GCP',
+  'google cloud': 'GCP',
+  'azure': 'Azure',
+  'microsoft azure': 'Azure',
+  'java': 'Java',
+  'c#': 'C#',
+  'csharp': 'C#',
+  '.net': '.NET',
+  'dotnet': '.NET',
+  'asp.net': '.NET',
+  '.net core': '.NET',
+  'php': 'PHP',
+  'mysql': 'MySQL',
+  'mariadb': 'MySQL',
+  'rest': 'REST',
+  'rest api': 'REST',
+  'restful': 'REST',
+  'restful api': 'REST',
+  'html': 'HTML',
+  'html5': 'HTML',
+  'css': 'CSS',
+  'css3': 'CSS',
+  'git': 'Git',
+  'ci/cd': 'CI/CD',
+  'unity': 'Unity',
+  'unity3d': 'Unity',
+  'excel': 'Excel',
+  'ms excel': 'Excel',
+  'microsoft excel': 'Excel',
+  // search only (not in the pipeline's list): SQL dialects
+  'mssql': 'SQL Server',
+  'ms sql': 'SQL Server',
+  'sql server': 'SQL Server',
+  't-sql': 'SQL Server',
+  'sqlite': 'SQLite',
+  'oracle': 'Oracle',
+  'pl/sql': 'Oracle',
+}
+
+// A posting asking for MySQL fits someone who knows SQL, and "SQL" in a
+// posting fits someone who knows MySQL: one counts for the other, both ways.
+const SQL_FAMILY = new Set(['SQL', 'MySQL', 'PostgreSQL', 'SQL Server', 'SQLite', 'Oracle'])
+
+/** The canonical spelling of a skill ("postgres" -> "PostgreSQL"); unknown names stay as written. */
+export function canonicalSkill(skill: string): string {
+  return SKILL_ALIASES[skill.trim().toLowerCase()] ?? skill.trim()
+}
+
+/**
+ * The canonical skills one profile entry counts for, like skill_alternatives()
+ * in src/vocabulary.py: "REST API" -> {REST}; "HTML/CSS" -> {HTML, CSS}
+ * ("CI/CD" and "PL/SQL" are skill names, so they are not split).
+ */
+export function skillAlternatives(profileSkill: string): string[] {
+  if (profileSkill.trim().toLowerCase() in SKILL_ALIASES || !profileSkill.includes('/')) return [canonicalSkill(profileSkill)]
+  return profileSkill.split('/').filter((part) => part.trim()).map(canonicalSkill)
+}
+
 function scoreSkills(skills: string[], ctx: ScoringContext, weight: number): [number, string[]] {
+  // canonical name (folded) -> [name as written in my profile, my level]
   const mine = new Map<string, [string, number]>()
   for (const [name, level] of Object.entries(ctx.skills)) {
-    for (const part of [name, ...name.split('/')]) mine.set(fold(part), [name, level])
+    for (const alternative of skillAlternatives(name)) mine.set(fold(alternative), [name, level])
   }
-  const unique = [...new Set(skills.map(fold).filter(Boolean))]
+  // My best SQL-family skill, for a posting's dialect I don't list myself.
+  const sqlSkills = [...SQL_FAMILY].map((s) => mine.get(fold(s))).filter((hit) => hit !== undefined)
+  const bestSql = sqlSkills.sort((a, b) => b[1] - a[1])[0]
+
+  const unique = [...new Map(skills.map(canonicalSkill).filter(Boolean).map((s) => [fold(s), s])).values()]
   if (!unique.length) return [0, ['~ no skills listed']]
-  const matched = new Map<string, number>()
+  const matched = new Map<string, [number, string]>() // profile name -> [level, the posting's skill if different]
   const missing: string[] = []
   for (const skill of unique) {
-    const hit = mine.get(skill)
-    if (hit) matched.set(hit[0], hit[1])
-    else missing.push(skill)
+    const direct = mine.get(fold(skill))
+    const hit = direct ?? (SQL_FAMILY.has(skill) ? bestSql : undefined)
+    if (hit && !matched.has(hit[0])) matched.set(hit[0], [hit[1], direct ? '' : skill])
+    else if (!hit) missing.push(skill)
   }
-  const earned = [...matched.values()].reduce((sum, level) => sum + level / 3, 0)
+  const earned = [...matched.values()].reduce((sum, [level]) => sum + level / 3, 0)
   const points = weight * Math.min(1, earned / Math.min(unique.length, SKILLS_FOR_FULL_POINTS))
-  const reasons = [...matched].sort((a, b) => b[1] - a[1]).map(([name, level]) => `+ ${name} (${level})`)
+  // "+ SQL (2) for MySQL": the point came through the SQL family, not the same name.
+  const reasons = [...matched].sort((a, b) => b[1][0] - a[1][0])
+    .map(([name, [level, via]]) => `+ ${name} (${level})${via ? ` for ${via}` : ''}`)
   if (missing.length) reasons.push(`- not in my skills: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ' ...' : ''}`)
   return [points, reasons]
 }

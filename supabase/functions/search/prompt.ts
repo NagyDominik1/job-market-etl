@@ -12,6 +12,25 @@ export const MAX_FETCHES = 4 // pages opened per chunk, postings or lists (no ex
 export const MAX_CHUNKS = 6
 const FETCH_MAX_TOKENS = 8000 // per page: a posting fits, a huge page is cut
 
+/** What one chunk may use. */
+export interface ChunkBudget {
+  searches: number
+  fetches: number
+  perListing: number // postings reported from one list page
+  fetchTokens: number // max_content_tokens per fetched page
+}
+
+export const DEFAULT_BUDGET: ChunkBudget = {
+  searches: MAX_SEARCHES, fetches: MAX_FETCHES, perListing: 10, fetchTokens: FETCH_MAX_TOKENS,
+}
+
+// Run 10: the Subotica chunk timed out. Every chunk does all its searches,
+// fetches and the submit in ONE Claude request (45 s max), and Serbian list
+// pages (helloworld.rs, infostud) are long: the request ran out of time, so
+// nothing could be saved. Serbian city chunks get less to do: 3 searches, 3
+// pages, shorter pages, and at most 5 postings per list page (a shorter answer).
+export const SERBIAN_BUDGET: ChunkBudget = { searches: 3, fetches: 3, perListing: 5, fetchTokens: 5000 }
+
 /** The search_profile row (migration 007); every field may be empty. */
 export interface Profile {
   skills: Record<string, number>
@@ -265,6 +284,11 @@ export function buildQueryPlan(params: SearchParams, max = MAX_SEARCHES): string
 export interface Chunk {
   label: string // shown on the dashboard, e.g. "Szeged", "remote"
   params: SearchParams // the run's params narrowed to this chunk
+  budget: ChunkBudget
+}
+
+function budgetFor(country: string): ChunkBudget {
+  return country === 'RS' ? SERBIAN_BUDGET : DEFAULT_BUDGET
 }
 
 // A country searched as a whole when no city is given ("junior fejlesztő
@@ -279,17 +303,23 @@ const COUNTRY_NAMES: Record<string, string> = { HU: 'Magyarország', RS: 'Srbija
  */
 export function buildChunks(params: SearchParams): Chunk[] {
   const places = params.cities.length
-    ? params.cities.map((city) => ({ label: city, params: { ...params, cities: [city], remote: false } }))
+    ? params.cities.map((city) => ({
+      label: city,
+      params: { ...params, cities: [city], remote: false },
+      budget: budgetFor(cityCountry(city, params.countries)),
+    }))
     : params.countries.map((code) => {
       const name = COUNTRY_NAMES[code] ?? code
-      return { label: name, params: { ...params, countries: [code], cities: [name], remote: false } }
+      return { label: name, params: { ...params, countries: [code], cities: [name], remote: false }, budget: budgetFor(code) }
     })
-  const remote = params.remote ? [{ label: 'remote', params: { ...params, cities: [], remote: true } }] : []
+  const remote = params.remote
+    ? [{ label: 'remote', params: { ...params, cities: [], remote: true }, budget: DEFAULT_BUDGET }]
+    : []
   return [...places.slice(0, MAX_CHUNKS - remote.length), ...remote]
 }
 
 /** The jobs task, with the query plan as a numbered list. */
-function jobsTask(plan: string[]): string {
+function jobsTask(plan: string[], budget: ChunkBudget): string {
   return `Task: find CURRENTLY OPEN job postings for the parameters below and report every posting
 you opened.
 
@@ -302,7 +332,7 @@ How to work:
    job sites (a list shows many postings for one fetch). Prefer the employer's site, its ATS
    page, or the local job sites (Hungary: profession.hu; Serbia: helloworld.rs,
    poslovi.infostud.com, joberty.com).
-2. Open them with web_fetch (up to ${MAX_FETCHES} pages in total). On a posting page read title,
+2. Open them with web_fetch (up to ${budget.fetches} pages in total). On a posting page read title,
    company, city, seniority, years of experience and deadline FROM THE POSTING ITSELF. On a
    list page read every posting it lists. Do not follow a list's next pages.
    Never fetch ${FETCH_BLOCKED_DOMAINS.join(', ')} (blocked; its terms forbid automated access). A posting
@@ -315,7 +345,7 @@ How to work:
    - Posting seen on a fetched list page: source "listing", listing_url = that list page's URL
      exactly as you fetched it, confirmed: false, url = the posting's OWN link from the list
      (absolute https URL, not the list page). Title, company and city as the list shows them;
-     seniority "unknown" and years_required 0 unless the list states them. At most 10
+     seniority "unknown" and years_required 0 unless the list states them. At most ${budget.perListing}
      postings per list page: the ones that best match the search.
    - Promising postings seen only in search results: source "posting", confirmed: false.
    The url must be the single posting page, never a search-results page, a category/list page
@@ -343,10 +373,11 @@ export function buildUserPrompt(
   profile: Profile | null,
   appliedCompanies: string[],
   today: string,
+  budget: ChunkBudget = DEFAULT_BUDGET,
 ): string {
   return [
     `Today is ${today}.`,
-    mode === 'jobs' ? jobsTask(buildQueryPlan(params)) : COMPANIES_RUBRIC,
+    mode === 'jobs' ? jobsTask(buildQueryPlan(params, budget.searches), budget) : COMPANIES_RUBRIC,
     '',
     'Search parameters:',
     `- Countries: ${list(params.countries)}`,
@@ -392,12 +423,12 @@ export function webSearchTool(maxUses: number) {
  * blocked_domains: sites whose terms forbid automated access (LinkedIn); the API
  * enforces it, subdomains included. LinkedIn may still appear in search results.
  */
-export function webFetchTool(maxUses: number) {
+export function webFetchTool(maxUses: number, maxContentTokens = FETCH_MAX_TOKENS) {
   return {
     type: 'web_fetch_20260318' as const,
     name: 'web_fetch' as const,
     max_uses: maxUses,
-    max_content_tokens: FETCH_MAX_TOKENS,
+    max_content_tokens: maxContentTokens,
     blocked_domains: [...FETCH_BLOCKED_DOMAINS],
     allowed_callers: ['direct' as const],
   }

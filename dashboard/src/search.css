@@ -79,3 +79,7 @@
 .chunk.error {
   color: var(--minus);
 }
+
+.chunk .retry {
+  margin-left: 0.5rem;
+}

@@ -326,3 +326,59 @@ def test_only_the_edge_function_may_claim_chunks(conn_with_roles):
             as_role(conn_with_roles, role, "SELECT * FROM claim_search_chunk(1, 0)")
     conn_with_roles.execute("UPDATE search_runs SET chunks_total = 1")
     assert len(as_role(conn_with_roles, "service_role", "SELECT * FROM claim_search_chunk(1, 0)")) == 1
+
+
+# --- retry of a failed chunk (015) -------------------------------------------------------------
+
+def retry(conn, run_id, chunk):
+    return conn.execute("SELECT mode, params, chunks_total FROM claim_search_chunk_retry(%s, %s)", (run_id, chunk)).fetchall()
+
+
+def finished_with_failed_chunk(conn, status="success", failed=(1,)):
+    run_id = start_chunked(conn)
+    conn.execute("UPDATE search_runs SET status = %s, next_chunk = 3, chunks_failed = %s, failed_chunks = %s "
+                 "WHERE id = %s", (status, len(failed), list(failed), run_id))
+    return run_id
+
+
+def test_a_failed_chunk_can_be_retried_once_and_reopens_the_run(conn):
+    run_id = finished_with_failed_chunk(conn)
+    assert retry(conn, run_id, 1) == [("jobs", {"cities": ["Szeged", "Subotica"]}, 3)]
+    row = conn.execute("SELECT status, finished_at, failed_chunks, retried_chunks FROM search_runs WHERE id = %s",
+                       (run_id,)).fetchone()
+    assert row == ("running", None, [], [1])
+    conn.execute("UPDATE search_runs SET status = 'success', failed_chunks = '{1}' WHERE id = %s", (run_id,))
+    assert retry(conn, run_id, 1) == []                       # failed again: no second retry
+
+
+def test_only_failed_chunks_can_be_retried(conn):
+    run_id = finished_with_failed_chunk(conn)
+    assert retry(conn, run_id, 0) == []
+
+
+def test_no_retry_while_the_run_is_still_running(conn):
+    run_id = finished_with_failed_chunk(conn, status="running")
+    assert retry(conn, run_id, 1) == []
+
+
+def test_a_run_where_every_chunk_failed_can_be_retried(conn):
+    run_id = finished_with_failed_chunk(conn, status="error", failed=(0, 1, 2))
+    assert len(retry(conn, run_id, 2)) == 1
+
+
+def test_no_retry_after_the_hour_or_for_an_older_run(conn):
+    old = finished_with_failed_chunk(conn, status="error")   # error: a new search may start
+    conn.execute("UPDATE search_runs SET started_at = now() - interval '61 minutes' WHERE id = %s", (old,))
+    assert retry(conn, old, 1) == []                          # older than an hour
+    conn.execute("UPDATE search_runs SET started_at = now() - interval '30 minutes' WHERE id = %s", (old,))
+    newer = finished_with_failed_chunk(conn, status="error")
+    assert retry(conn, old, 1) == []                          # a newer run exists
+    assert len(retry(conn, newer, 1)) == 1
+
+
+def test_only_the_edge_function_may_claim_retries(conn_with_roles):
+    for role in ("anon", "authenticated"):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            as_role(conn_with_roles, role, "SELECT * FROM claim_search_chunk_retry(1, 0)")
+    conn_with_roles.execute("UPDATE search_runs SET status = 'success', chunks_total = 1, failed_chunks = '{0}'")
+    assert len(as_role(conn_with_roles, "service_role", "SELECT * FROM claim_search_chunk_retry(1, 0)")) == 1

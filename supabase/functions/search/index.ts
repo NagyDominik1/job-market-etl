@@ -17,6 +17,9 @@
 //        + web fetch, small budget, 60 s), the answer as ONE submit_results
 //        call (strict JSON, facts only), validated, scored by our code
 //        (score.ts), stored; the run's counts add up chunk by chunk
+//   {action: "retry", run_id, chunk} -> a failed chunk once more, inside the
+//        same run (claim_search_chunk_retry, 015: once per chunk, only the
+//        latest run, within its hour), not a new hourly search
 // Every call first checks the caller is a logged-in user (no token -> 401).
 // The function itself never acts on web content: the searches and page fetches
 // run on Anthropic's side, our code fetches nothing and writes only its own two
@@ -25,7 +28,7 @@
 import Anthropic from 'npm:@anthropic-ai/sdk@1.3.0'
 import { createClient } from 'npm:@supabase/supabase-js@2.118.0'
 import {
-  FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MAX_FETCHES, MAX_SEARCHES, MIN_CANDIDATES, MODEL, type Profile,
+  type ChunkBudget, FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MIN_CANDIDATES, MODEL, type Profile,
   SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildChunks, buildUserPrompt, webFetchTool, webSearchTool,
 } from './prompt.ts'
 import { scoringContext } from './score.ts'
@@ -155,6 +158,7 @@ async function askClaude(
   client: Anthropic,
   mode: Mode,
   params: SearchParams,
+  budget: ChunkBudget, // searches/fetches/page size for this chunk (smaller for Serbian cities)
   profile: Profile | null,
   appliedCompanies: string[],
   usage: Usage,
@@ -162,7 +166,7 @@ async function askClaude(
   tag: string, // "run 12 / Szeged", for the log
 ): Promise<{ input: unknown; stoppedEarly: boolean }> {
   const messages: Anthropic.Messages.MessageParam[] = [
-    { role: 'user', content: buildUserPrompt(mode, params, profile, appliedCompanies, budapestToday()) },
+    { role: 'user', content: buildUserPrompt(mode, params, profile, appliedCompanies, budapestToday(), budget) },
   ]
   let reminded = false
   let wrappingUp = false
@@ -179,8 +183,8 @@ async function askClaude(
     if (timeout < 5_000) throw new Error('Time limit reached before Claude finished')
     // max_uses is per API request: give each continuation only what is left
     // of the budget, so a run never goes over it.
-    const searchesLeft = MAX_SEARCHES - usage.searches
-    const fetchesLeft = MAX_FETCHES - fetchesUsed(usage)
+    const searchesLeft = budget.searches - usage.searches
+    const fetchesLeft = budget.fetches - fetchesUsed(usage)
     if (searchesLeft <= 0 && reminded) throw new Error('Search budget used up without results')
 
     let response: Anthropic.Messages.Message
@@ -194,7 +198,11 @@ async function askClaude(
           // still ends every chunk within 60 s. Thinking stays adaptive (default).
           output_config: { effort: 'medium' },
           system: SYSTEM_PROMPT,
-          tools: [webSearchTool(Math.max(searchesLeft, 1)), webFetchTool(Math.max(fetchesLeft, 1)), SUBMIT_RESULTS_TOOL],
+          tools: [
+            webSearchTool(Math.max(searchesLeft, 1)),
+            webFetchTool(Math.max(fetchesLeft, 1), budget.fetchTokens),
+            SUBMIT_RESULTS_TOOL,
+          ],
           messages,
         },
         // maxRetries 0: a retried timeout would double the time (run 4).
@@ -239,7 +247,7 @@ async function askClaude(
         reject(FETCH_FIRST_MESSAGE)
         continue
       }
-      if (candidates < MIN_CANDIDATES && MAX_SEARCHES - usage.searches > 0 && !keepGoingSent) {
+      if (candidates < MIN_CANDIDATES && budget.searches - usage.searches > 0 && !keepGoingSent) {
         keepGoingSent = true
         console.log(`search ${tag}: ${candidates} candidates, ${usage.searches} searches: keep going`)
         reject(KEEP_GOING_MESSAGE)
@@ -331,8 +339,10 @@ async function startRun(admin: Admin, mode: Mode, params: SearchParams): Promise
 
 /**
  * Add one chunk's usage and counts to its run (chunks run one after another,
- * enforced by claim_search_chunk, so read-then-write is safe). The last chunk
- * closes the run: success if at least one chunk worked, else error.
+ * enforced by claim_search_chunk / claim_search_chunk_retry, so read-then-write
+ * is safe). The last chunk, or a retry, closes the run: success if at least
+ * one chunk worked, else error. A failed chunk is remembered in failed_chunks
+ * (015): that is what a retry may claim.
  */
 async function recordChunk(
   admin: Admin,
@@ -342,12 +352,14 @@ async function recordChunk(
   usage: Usage,
   counts: Record<string, number | boolean> | null, // null = the chunk failed
   failure: string | null,
+  retry = false,
 ): Promise<void> {
   const { data: run } = await admin.from('search_runs').select('*').eq('id', runId).single()
   if (!run) return
   const add = (key: string) => (run[key] ?? 0) + Number(counts?.[key] ?? 0)
-  const failed = run.chunks_failed + (counts ? 0 : 1)
-  const last = index === total - 1
+  // A retry claimed a failed chunk: it no longer counts as failed unless it fails again.
+  const failed = run.chunks_failed + (counts ? 0 : 1) - (retry ? 1 : 0)
+  const last = retry || index === total - 1
   const fields: Record<string, unknown> = {
     searches_used: run.searches_used + usage.searches,
     input_tokens: run.input_tokens + usage.input,
@@ -365,6 +377,8 @@ async function recordChunk(
     last_activity_at: new Date().toISOString(),
     error: failure ? [run.error, failure].filter(Boolean).join('; ').slice(0, 1000) : run.error,
   }
+  // Without 015 the row has no failed_chunks: leave it out instead of failing the update.
+  if (Array.isArray(run.failed_chunks) && !counts) fields.failed_chunks = [...run.failed_chunks, index]
   if (last) {
     fields.status = failed < total ? 'success' : 'error'
     fields.finished_at = new Date().toISOString()
@@ -373,11 +387,18 @@ async function recordChunk(
   if (error) console.error(`search run ${runId}: could not record chunk ${index} (${error.message})`)
 }
 
-/** {action: "chunk"}: one chunk of a running run. */
-async function runChunk(admin: Admin, anthropicKey: string, runId: number, index: number): Promise<Response> {
-  const { data: claimed, error: claimError } = await admin.rpc('claim_search_chunk', { p_run_id: runId, p_chunk: index })
+/** {action: "chunk"}: one chunk of a running run; {action: "retry"}: a failed chunk once more. */
+async function runChunk(admin: Admin, anthropicKey: string, runId: number, index: number, retry: boolean): Promise<Response> {
+  const claim = retry ? 'claim_search_chunk_retry' : 'claim_search_chunk'
+  const { data: claimed, error: claimError } = await admin.rpc(claim, { p_run_id: runId, p_chunk: index })
   if (claimError) return json(500, { error: 'Could not start this part of the search' })
-  if (!claimed?.length) return json(409, { error: 'This part of the search already ran, or the search is finished' })
+  if (!claimed?.length) {
+    return json(409, {
+      error: retry
+        ? 'A failed part can be retried once, only in the latest search and within its hour'
+        : 'This part of the search already ran, or the search is finished',
+    })
+  }
   // The params were validated when the run started; check again (they come back as JSON).
   const stored = validateRequest({ mode: claimed[0].mode, params: claimed[0].params })
   const total: number = claimed[0].chunks_total
@@ -386,11 +407,11 @@ async function runChunk(admin: Admin, anthropicKey: string, runId: number, index
     searches: 0, fetches: 0, fetchCalls: 0, fetchErrors: [], fetchedUrls: [], fetchCallUrls: [], input: 0, output: 0,
   }
   if (!stored.ok || !chunk) {
-    await recordChunk(admin, runId, index, total, usage, null, `chunk ${index}: invalid stored parameters`)
+    await recordChunk(admin, runId, index, total, usage, null, `chunk ${index}: invalid stored parameters`, retry)
     return json(500, { error: 'Invalid stored search parameters' })
   }
   const { mode, params } = stored.value
-  const tag = `run ${runId} / ${chunk.label}`
+  const tag = `run ${runId} / ${chunk.label}${retry ? ' (retry)' : ''}`
   const startedAt = Date.now()
 
   try {
@@ -402,13 +423,14 @@ async function runChunk(admin: Admin, anthropicKey: string, runId: number, index
 
     const client = new Anthropic({ apiKey: anthropicKey })
     const { input: raw, stoppedEarly } =
-      await askClaude(client, mode, chunk.params, profile as Profile | null, appliedCompanies, usage, startedAt, tag)
+      await askClaude(client, mode, chunk.params, chunk.budget, profile as Profile | null, appliedCompanies, usage, startedAt, tag)
 
     // Validate (incl. the dealbreakers), score with ALL the run's cities and
     // roles (so a chunk's city keeps its priority), store.
     // already_applied is set by a database trigger.
     const { results, candidates, fromListings, dropped, droppedBy } = validateResults(
       raw, mode, rulesFromProfile(profile), budapestToday(), usage.fetchedUrls, scoringContext(params, profile),
+      chunk.budget.perListing,
     )
     const counts = { ...runCounts(candidates, droppedBy), stopped_early: stoppedEarly }
     let saved: unknown[] = []
@@ -420,7 +442,7 @@ async function runChunk(admin: Admin, anthropicKey: string, runId: number, index
       if (error) throw new Error(`Could not store the results: ${error.message}`)
       saved = data ?? []
     }
-    await recordChunk(admin, runId, index, total, usage, counts, null)
+    await recordChunk(admin, runId, index, total, usage, counts, null, retry)
     console.log(`search ${tag} domains: ${domainStats(usage.fetchCallUrls, raw)}`)
     console.log(`search ${tag} (${mode}): ${saved.length} results (${fromListings} from lists) of ${candidates} candidates, ` +
       `${dropped} dropped ${JSON.stringify(droppedBy)}, ${usage.searches} searches, ` +
@@ -439,7 +461,7 @@ async function runChunk(admin: Admin, anthropicKey: string, runId: number, index
   } catch (error) {
     const message = describeError(error)
     console.error(`search ${tag} failed: ${message}`)
-    await recordChunk(admin, runId, index, total, usage, null, `${chunk.label}: ${message}`)
+    await recordChunk(admin, runId, index, total, usage, null, `${tag.split(' / ')[1]}: ${message}`, retry)
     return json(502, { run_id: runId, chunk: index, label: chunk.label, error: message })
   }
 }
@@ -461,7 +483,7 @@ Deno.serve(async (req: Request) => {
   const { data: userData, error: userError } = await authClient.auth.getUser(token)
   if (userError || !userData.user) return json(401, { error: 'Log in first' })
 
-  // 2. Validate the body: start a run, or run one of its chunks.
+  // 2. Validate the body: start a run, run one of its chunks, or retry a failed one.
   let body: unknown
   try {
     body = await req.json()
@@ -480,5 +502,5 @@ Deno.serve(async (req: Request) => {
   const action = request.value
   return action.action === 'start'
     ? startRun(admin, action.mode, action.params)
-    : runChunk(admin, anthropicKey, action.runId, action.chunk)
+    : runChunk(admin, anthropicKey, action.runId, action.chunk, action.action === 'retry')
 })

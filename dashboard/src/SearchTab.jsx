@@ -10,6 +10,7 @@ import './search.css'
 // A search runs in chunks (run 9): one call starts the run, then one call per
 // city (plus remote), one after another, with progress per chunk. A failed
 // chunk doesn't stop the others, and the finished chunks' results stay.
+// A failed chunk can be retried once ("Újrapróbálás"), inside the same run.
 
 const SENIORITIES = ['intern', 'junior', 'mid', 'senior', 'lead']
 
@@ -123,9 +124,18 @@ const CHUNK_STATUS = {
 
 // "Szeged: kész, 4 találat" / "Subotica: hiba (…)"
 function chunkLine(chunk) {
-  if (chunk.status === 'done') return `kész, ${chunk.count} találat${chunk.stoppedEarly ? ' (időkorlát miatt hiányos)' : ''}`
-  if (chunk.status === 'error') return `hiba: ${chunk.message}`
+  const retried = chunk.retried ? ' (újrapróbálva)' : ''
+  if (chunk.status === 'done') {
+    return `kész, ${chunk.count} találat${chunk.stoppedEarly ? ' (időkorlát miatt hiányos)' : ''}${retried}`
+  }
+  if (chunk.status === 'error') return `hiba: ${chunk.message}${retried}`
   return CHUNK_STATUS[chunk.status]
+}
+
+// The run-level timeout text ("doesn't count, retry later") is wrong for one chunk.
+async function describeChunkError(error) {
+  const message = await describeFunctionError(error)
+  return message === TIMEOUT_MESSAGE ? 'időtúllépés' : message
 }
 
 // The last run's status line: success, still running, or why it failed.
@@ -210,7 +220,8 @@ export default function SearchTab({ session }) {
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null) // e.g. "stopped early, the list may be incomplete"
   const [responseCounts, setResponseCounts] = useState(null) // counts from the last search's response
-  const [chunks, setChunks] = useState([]) // [{label, status, count, message}] of the current search
+  const [chunks, setChunks] = useState([]) // [{label, status, count, message, retried}] of the current search
+  const [chunkRunId, setChunkRunId] = useState(null) // the run the chunk list belongs to (for retries)
   const appliedKeys = useAppliedCompanyKeys()
 
   // On open: fill the form from search_profile, and show the last search.
@@ -294,6 +305,7 @@ export default function SearchTab({ session }) {
 
     // 2. The chunks, one after another. Results appear as each chunk finishes;
     // a failed chunk is shown and the next one still runs.
+    setChunkRunId(started.run_id)
     let progress = started.chunks.map((label) => ({ label, status: 'waiting' }))
     const update = (index, fields) => {
       progress = progress.map((chunk, i) => (i === index ? { ...chunk, ...fields } : chunk))
@@ -308,9 +320,7 @@ export default function SearchTab({ session }) {
         body: { action: 'chunk', run_id: started.run_id, chunk: index },
       })
       if (chunkError) {
-        const message = await describeFunctionError(chunkError)
-        // The run-level timeout text ("doesn't count, retry later") is wrong for one chunk.
-        update(index, { status: 'error', message: message === TIMEOUT_MESSAGE ? 'időtúllépés' : message })
+        update(index, { status: 'error', message: await describeChunkError(chunkError) })
         continue
       }
       found = [...found, ...data.results].sort((a, b) => b.score - a.score)
@@ -323,6 +333,24 @@ export default function SearchTab({ session }) {
 
     // 3. The run's totals (added up chunk by chunk in search_runs) and the stored results.
     await reloadRun(started.run_id)
+    setLoading(false)
+  }
+
+  // "Újrapróbálás": one failed chunk once more, in the same run (migration 015).
+  // Not a new search: the hourly limit is not touched; the function allows one
+  // retry per chunk, only for the latest run and within its hour.
+  async function retryChunk(index) {
+    setLoading(true)
+    setError(null)
+    setChunks((current) => current.map((chunk, i) => (i === index ? { ...chunk, status: 'running', retried: true } : chunk)))
+    const { data, error: retryError } = await supabase.functions.invoke('search', {
+      body: { action: 'retry', run_id: chunkRunId, chunk: index },
+    })
+    const fields = retryError
+      ? { status: 'error', message: await describeChunkError(retryError) }
+      : { status: 'done', count: data.results.length, stoppedEarly: data.stopped_early }
+    setChunks((current) => current.map((chunk, i) => (i === index ? { ...chunk, ...fields } : chunk)))
+    await reloadRun(chunkRunId)
     setLoading(false)
   }
 
@@ -381,15 +409,20 @@ export default function SearchTab({ session }) {
         </button>
         <span className="hint">
           Óránként egy keresés. Városonként egy rész (max. 6, a remote is egy), részenként legfeljebb 4 webes
-          keresés (~$0.04) és kb. 1 perc.
+          keresés (~$0.04; szerb városoknál 3) és kb. 1 perc. Egy hibás rész egyszer újrapróbálható.
         </span>
       </form>
 
       {chunks.length > 0 && (
         <ol className="chunk-progress" aria-label="Haladás városonként">
-          {chunks.map((chunk) => (
+          {chunks.map((chunk, index) => (
             <li key={chunk.label} className={`chunk ${chunk.status}`}>
               <strong>{chunk.label}</strong>: {chunkLine(chunk)}
+              {chunk.status === 'error' && !chunk.retried && !loading && (
+                <button type="button" className="secondary small retry" onClick={() => retryChunk(index)}>
+                  Újrapróbálás
+                </button>
+              )}
             </li>
           ))}
         </ol>

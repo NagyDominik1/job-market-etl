@@ -210,8 +210,20 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 - The model reports facts only (title, company, city, skills, level, years, source; at most
   10 postings per list page). Score and reasons are computed by our code (score.ts, the
   weights of src/scoring.py; companies: city 30, stack 30, junior-friendly 20, contact 20),
-  with the run's cities/roles/levels and the profile's skills. Skills match by name only
-  (no alias vocabulary like the Python version).
+  with the run's cities/roles/levels and the profile's skills. Skills use the aliases of
+  src/vocabulary.py (copied into score.ts; a Node test keeps them equal) plus an SQL family
+  the pipeline doesn't have: MySQL/PostgreSQL/SQL Server/SQLite/Oracle count for "SQL" and
+  back ("+ SQL (2) for MySQL").
+- After run 10 (Subotica timed out: each chunk does everything in ONE Claude request, max
+  45 s, and Serbian list pages are long): Serbian chunks (city in Serbia, or country RS) get
+  3 searches + 3 fetches, 5000 tokens per page and at most 5 postings per list page
+  (SERBIAN_BUDGET); the others keep 4 + 4, 8000, 10.
+- "Újrapróbálás" (015): a failed chunk can be retried once, in the same run, from the
+  Keresés tab: {action: "retry"} -> claim_search_chunk_retry() (failed_chunks /
+  retried_chunks; only a finished run, only the latest run, within its hour) reopens the
+  run, the function closes it again. Not a new search: the hourly limit is untouched, and
+  the extra cost is bounded by one chunk per failed chunk. The button is shown only right
+  after the search (the chunk list is not stored).
 - linkedin.com is never fetched (its terms forbid automated access): it is in web_fetch's
   blocked_domains (FETCH_BLOCKED_DOMAINS in validate.ts), so LinkedIn is used only through
   search results. A LinkedIn posting counts only if Claude finds and opens the same posting
