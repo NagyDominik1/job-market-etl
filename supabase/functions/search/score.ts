@@ -139,7 +139,7 @@ function scoreSkills(skills: string[], ctx: ScoringContext, weight: number): [nu
     for (const alternative of skillAlternatives(name)) mine.set(fold(alternative), [name, level])
   }
   // My best SQL-family skill, for a posting's dialect I don't list myself.
-  const sqlSkills = [...SQL_FAMILY].map((s) => mine.get(fold(s))).filter((hit) => hit !== undefined)
+  const sqlSkills = [...SQL_FAMILY].map((s) => mine.get(fold(s))).filter((hit): hit is [string, number] => hit !== undefined)
   const bestSql = sqlSkills.sort((a, b) => b[1] - a[1])[0]
 
   const unique = [...new Map(skills.map(canonicalSkill).filter(Boolean).map((s) => [fold(s), s])).values()]
