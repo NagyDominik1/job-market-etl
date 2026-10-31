@@ -1,7 +1,7 @@
 // Edge Function "draft-letter" (Phase 9.5): a short application letter.
 //
 // Browser (logged in) --POST {application_id | search_result_id, language}--> this function
-//     -> my template (letter_templates) + ONE tailored sentence from Claude
+//     -> my template (letter_templates) + 1-2 tailored sentences from Claude (my real projects)
 //     -> {subject, body, language, suggested CV, contact}
 //
 // The letter is only returned and shown: I copy it or open it in my mail
