@@ -251,21 +251,34 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
 - Jelentkezéseim order: "Legújabb elöl" (default) = applied_at desc with not-yet-sent ones
   first, then created_at desc; or "Következő teendő szerint" (next_action_date).
 - Letters (9.5): Edge Function "draft-letter" (claude-haiku-5-5, no web tools, verify_jwt,
-  same login check as search) gets {application_id} or {search_result_id}. Plain rules
-  decide (letter.ts): language = my choice > the application's language > Hungarian city or
-  .hu link: hu > Serbian city or .rs link: sr if the posting text looks Serbian (Cyrillic,
-  č/ć/š/ž/đ, typical words), else en > remote/unknown: en; CV = hu for a hu letter, else en;
-  kind = posting if there is a position, else open. Claude writes only ONE sentence
-  ({tailored_line}, structured output, effort low) from the posting text and match reasons;
-  the code keeps its first sentence. If Claude fails, a rule-based line from the matched
-  skills is used (line_by = rules), so a letter always comes back. Max 5 sentences (greeting
+  same login check as search) gets {application_id} or {search_result_id} and a language.
+  The language is always picked by me on the dashboard (hu/sr/en, required; an application's
+  saved language is pre-selected): the automatic guess was dropped after the first real
+  letter. CV = hu for a hu letter, else en; kind = posting if there is a position, else open.
+  Claude writes only ONE sentence ({tailored_line}, structured output, effort low) from the
+  posting text and match reasons; the code keeps its first sentence and checks its language
+  (languageScores: common words + letters only one language uses; another language scoring
+  higher = wrong). Wrong language -> asked once more; wrong again, or Claude fails -> the
+  template's rule-based line from the matched skills (line_by = rules), so a letter always
+  comes back in the chosen language. {skills} = my skills the posting matched (match reasons)
+  first, then my strongest, max 4, only names from search_profile. Hungarian: the article
+  before {company}/{position} is chosen for the word (a/az by the first sound; acronyms by
+  the name of their first letter, "az SQL", "a PHP"; numbers as read), never "A(z)". Max 5 sentences (greeting
   and closing lines don't count), checked by the function and by the Sablonok editor (a JS
   copy of the rule). Contact = the newest company-search contact for the same company_key.
   Max 30 letters per hour (a simple count, a cost cap). The letter is only shown: "Másolás"
   and "Megnyitás levelezőben" (mailto:); nothing is ever sent by the system.
-- My templates are not in git: sql/letter_templates_template.sql (placeholders) is committed,
-  sql/letter_templates_local.sql (generated from profile.yaml, my skills) is gitignored and run
-  by me. No name/phone in the templates: the e-mail signature adds them.
+- Templates: sql/letter_templates_template.sql runs as it is (nothing personal since the skills
+  became {skills}; the earlier gitignored letter_templates_local.sql is gone). No name/phone in
+  the templates: the e-mail signature adds them.
+- Search, employer names (after run 11): company_name must be the employer named in the
+  posting (prompt + schema description). The code drops results whose "company" is a job
+  board (Jooble, profession.hu...), a job-site category or a placeholder ("Unclassified",
+  "Confidential", generic "IT Consulting Company", empty): companyProblem(), counted in
+  dropped_other (no new column). Staffing agencies and remote talent marketplaces (Turing,
+  SynergisticIT, Toptal, Randstad, "...Staffing"...) are kept but get AGENCY_REASON as their
+  first reason and 25 points less (isAgency); the dashboard shows an "ügynökség" badge for that
+  reason. Name lists, not AI: explainable, testable, extended when a run shows a new case.
 
 ## Known limitations
 - The same job posted with a Hungarian and a Serbian (or English) title is NOT matched

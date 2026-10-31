@@ -83,3 +83,8 @@
 .chunk .retry {
   margin-left: 0.5rem;
 }
+
+/* A staffing agency or remote marketplace, not the employer (run 11). */
+.badge.agency {
+  background: var(--low);
+}

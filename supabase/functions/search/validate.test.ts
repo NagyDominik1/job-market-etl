@@ -9,6 +9,7 @@ import {
   FETCH_BLOCKED_DOMAINS, LISTING_REASON, MAX_PER_LISTING, MAX_RESULTS, NO_RULES, cleanText, contact, dealbreaker,
   domainStats, httpUrl, isFetchBlocked, isListingUrl, isoDate, normalizeUrl, rulesFromProfile, runCounts, validateAction,
   validateRequest, validateResults,
+  AGENCY_PENALTY, AGENCY_REASON, companyProblem, isAgency,
 } from './validate.ts'
 import {
   FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MAX_CHUNKS, MAX_FETCHES, MAX_SEARCHES, MIN_CANDIDATES, SUBMIT_RESULTS_TOOL,
@@ -682,4 +683,62 @@ test('SQL family: MySQL counts for SQL and SQL for MySQL, and the reason says so
   assert.equal(reverse.reasons[0], '+ MySQL (3) for SQL')
   const none = scoreJob({ title: 'x', city: '', remote: false, seniority: 'junior', skills: ['MySQL'] }, { ...CTX, skills: { PHP: 3 } })
   assert.equal(none.reasons[0], '- not in my skills: MySQL')
+})
+
+// --- run 11: the employer's name, agencies ------------------------------------------------------
+
+test('company: job boards, categories and placeholders are not employers', () => {
+  for (const name of ['Jooble', 'profession.hu', 'HelloWorld.rs', 'Hello World', 'Infostud', 'LinkedIn', 'Dice']) {
+    assert.equal(companyProblem(name), 'job_board', name)
+  }
+  for (const name of ['Unclassified', 'Confidential', 'CONFIDENTIAL COMPANY', 'IT Consulting Company', 'a leading software company',
+    'International Fintech Startup', 'Bizalmas', 'Poverljivo', 'N/A', '', '  ']) {
+    assert.equal(companyProblem(name), 'placeholder', JSON.stringify(name))
+  }
+  for (const name of ['IT / Telekommunikáció', 'Programiranje', 'Software Development']) {
+    assert.equal(companyProblem(name), 'category', name)
+  }
+  for (const name of ['Endava', 'ErdSoft Kft.', 'IT Labs', 'Nordeus d.o.o.', 'Profession Software Kft. Budapest', 'Diceware Ltd']) {
+    assert.equal(companyProblem(name), null, name)
+  }
+})
+
+test('results with a non-employer company are dropped and counted (dropped_other)', () => {
+  const { results, droppedBy } = validateResults({
+    results: [
+      GOOD_JOB,
+      { ...GOOD_JOB, title: 'B', company_name: 'Jooble' },
+      { ...GOOD_JOB, title: 'C', company_name: 'Unclassified' },
+      { ...GOOD_JOB, title: 'D', company_name: 'IT / Telekommunikáció' },
+    ],
+  }, 'jobs')
+  assert.deepEqual(results.map((r) => r.company_name), ['Acme Kft.'])
+  assert.equal(droppedBy.bad_company, 3)
+  assert.equal(runCounts(4, droppedBy).dropped_other, 3)
+  assert.match(SUBMIT_RESULTS_TOOL.input_schema.properties.results.items.properties.company_name.description, /EMPLOYER/)
+  assert.match(buildUserPrompt('jobs', PARAMS, null, [], '2026-10-31'), /never the job site/i)
+})
+
+test('agencies and marketplaces: marked (first reason) and scored lower, never above the employer', () => {
+  for (const name of ['Turing', 'Turing.com', 'SynergisticIT', 'Toptal', 'Randstad Hungary Kft.', 'Robert Half', 'XY Staffing',
+    'ProHuman Munkaerő-kölcsönző', 'Talent Solutions d.o.o.']) {
+    assert.equal(isAgency(name), true, name)
+  }
+  for (const name of ['Turingsoft Kft.', 'Endava', 'Acme Kft.', 'Recrea Systems']) assert.equal(isAgency(name), false, name)
+  const job = { ...GOOD_JOB, skills: ['PHP'] }
+  const { results } = validateResults({ results: [{ ...job, company_name: 'Turing' }, job] }, 'jobs', NO_RULES, null, null, CTX)
+  const [employer, agency] = results
+  assert.equal(employer.company_name, 'Acme Kft.')
+  assert.equal(agency.score, Math.max(0, employer.score - AGENCY_PENALTY))
+  assert.equal(agency.reasons[0], AGENCY_REASON)
+  assert.equal(employer.reasons.includes(AGENCY_REASON), false)
+  // Companies mode: the same mark for an open-application target.
+  const companies = validateResults({ results: [{ ...job, title: '', company_name: 'SynergisticIT', url: 'https://synergisticit.com/careers' }] },
+    'companies', NO_RULES, null, null, CTX).results
+  assert.equal(companies[0].reasons[0], AGENCY_REASON)
+})
+
+test('a listing agency result keeps both marks, the listing one first', () => {
+  const { results } = validateResults({ results: [{ ...FROM_LIST, company_name: 'Turing' }] }, 'jobs', NO_RULES, null, [LIST_PAGE])
+  assert.deepEqual(results[0].reasons.slice(0, 2), [LISTING_REASON, AGENCY_REASON])
 })

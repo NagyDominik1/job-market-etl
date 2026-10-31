@@ -63,7 +63,11 @@ export const SUBMIT_RESULTS_TOOL = {
           type: 'object',
           properties: {
             title: { type: 'string', description: 'Job title (jobs mode); empty string in companies mode' },
-            company_name: { type: 'string' },
+            company_name: {
+              type: 'string',
+              description: 'The EMPLOYER named in the posting itself; never the job site, a category or a placeholder ' +
+                '("Confidential", "IT Company"). Empty string if the posting names no employer',
+            },
             city: { type: 'string', description: 'City, or "remote"' },
             remote: { type: 'boolean' },
             url: { type: 'string', description: 'Link to the posting (jobs) or the company careers page (companies)' },
@@ -347,6 +351,9 @@ How to work:
      (absolute https URL, not the list page). Title, company and city as the list shows them;
      seniority "unknown" and years_required 0 unless the list states them. At most ${budget.perListing}
      postings per list page: the ones that best match the search.
+   - company_name is always the employer named in the posting (for an agency posting: the
+     agency's own name). Never the job site (profession.hu, Jooble, HelloWorld...), a category
+     or a placeholder like "Confidential"; leave it empty when no employer is named.
    - Promising postings seen only in search results: source "posting", confirmed: false.
    The url must be the single posting page, never a search-results page, a category/list page
    or a careers index.

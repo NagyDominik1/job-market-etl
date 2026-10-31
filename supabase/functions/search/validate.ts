@@ -282,6 +282,95 @@ export function domainStats(fetchedUrls: string[], input: unknown): string {
     .join(', ') || '(nothing fetched)'
 }
 
+// --- the employer's name (run 11) ----------------------------------------------------------
+//
+// Run 11 had results whose "company" was the job board ("Jooble"), a category
+// ("IT / Telekommunikáció") or a placeholder ("Unclassified", "Confidential",
+// "IT Consulting Company"). Those can't be applied to, can't be matched with
+// company_key, and break the duplicate check, so they are dropped (counted in
+// dropped_other). All names are compared folded: lowercase, no accents,
+// punctuation -> spaces.
+
+function foldName(name: string): string {
+  return name.toLowerCase().replace(/đ/g, 'dj').normalize('NFKD').replace(/\p{M}/gu, '')
+    .replace(/[^a-z0-9#+]+/g, ' ').trim()
+}
+
+// Job boards and aggregators: they list postings, they are not the employer.
+// Compared without spaces ("Hello World", "helloworld.rs" -> "helloworldrs").
+const JOB_BOARDS = new Set([
+  'profession', 'professionhu', 'jooble', 'helloworld', 'helloworldrs', 'infostud', 'posloviinfostud', 'poslovi',
+  'posloviinfostudcom', 'joberty', 'jobertycom', 'linkedin', 'indeed', 'glassdoor', 'dice', 'remoterocketship',
+  'jobgether', 'careerjet', 'talentcom', 'simplyhired', 'ziprecruiter', 'nofluffjobs', 'remoteok', 'weworkremotely',
+  'monster', 'cvonline', 'jobline', 'workania', 'euremotejobs', 'builtin', 'wellfound', 'himalayas', 'remotive',
+  'startupjobs', 'cvcentrum', 'jobmonitor', 'karrierportal', 'mfor', 'hasznaltauto', 'jobinfo', 'jobsinhungary',
+])
+
+// Placeholder names a job site shows when the employer is hidden or unknown.
+const PLACEHOLDER_NAMES = new Set([
+  'unclassified', 'confidential', 'confidential company', 'confidential employer', 'anonymous', 'anonymous employer',
+  'anonymous company', 'undisclosed', 'undisclosed company', 'undisclosed employer', 'not specified', 'unknown',
+  'unknown company', 'n a', 'na', 'company', 'employer', 'client', 'our client', 'private', 'private company',
+  'private employer', 'hidden', 'hidden company', 'various', 'various employers', 'multiple companies',
+  'bizalmas', 'titkos', 'nem publikus', 'megbizonak', 'partnerunk', 'poverljivo', 'anonimno', 'nepoznato',
+  'nas klijent', 'klijent',
+])
+
+// Category names of job sites ("IT / Telekommunikáció", "Programiranje").
+const CATEGORY_NAMES = new Set([
+  'it', 'informatika', 'it telekommunikacio', 'informatika telekommunikacio', 'telekommunikacio',
+  'software development', 'szoftverfejlesztes', 'fejlesztes', 'programozas', 'programiranje', 'it programiranje',
+  'razvoj softvera', 'it software', 'it software development', 'engineering', 'remote', 'remote jobs',
+  'informacione tehnologije', 'it i telekomunikacije',
+])
+
+// Generic descriptions instead of a name: "IT Consulting Company", "a leading
+// software company", "International Fintech Startup".
+const GENERIC_NAME = new RegExp(
+  '^(an? |the )?((leading|large|small|international|global|growing|fast growing|well known|renowned|reputable|' +
+  'multinational|local|us|eu|european|american|german|swiss|uk|hungarian|serbian|dutch|austrian)\\s+)*' +
+  '(it|software|tech|technology|consulting|it consulting|it services|digital|outsourcing|development|fintech|' +
+  'ecommerce|e commerce|product|game|gaming|saas|telecom|automotive)' +
+  '(\\s+(consulting|services|solutions|development|outsourcing|product))?' +
+  '\\s+(company|firm|agency|employer|client|startup|business|corporation|enterprise|partner|ceg|vallalat|kompanija|firma)$',
+)
+
+/** Why a company name is not an employer's name, or null when it is fine. */
+export function companyProblem(name: string): 'placeholder' | 'job_board' | 'category' | null {
+  const folded = foldName(name)
+  if (!folded || PLACEHOLDER_NAMES.has(folded) || GENERIC_NAME.test(folded)) return 'placeholder'
+  const compact = folded.replace(/ /g, '')
+  const withoutTld = compact.replace(/(hu|rs|com|org|io|net|eu)$/, '')
+  if (JOB_BOARDS.has(compact) || JOB_BOARDS.has(withoutTld)) return 'job_board'
+  if (CATEGORY_NAMES.has(folded)) return 'category'
+  return null
+}
+
+// Staffing agencies and remote talent marketplaces (run 11: Turing,
+// SynergisticIT): they post on behalf of unknown clients or hire for
+// themselves to place you elsewhere. Kept (some are real options) but marked
+// with a reason (the dashboard shows an "ügynökség" badge for it) and a lower
+// score, so they don't outrank real employers. Whole words at the start of
+// the name ("Turing", "Turing.com"; not "Turingsoft").
+const AGENCY_NAMES = [
+  'turing', 'synergisticit', 'toptal', 'crossover', 'andela', 'upwork', 'fiverr', 'braintrust', 'revelo',
+  'lemon io', 'arc dev', 'gun io', 'x team', 'randstad', 'adecco', 'manpower', 'manpowergroup', 'hays',
+  'robert half', 'experis', 'grafton', 'trenkwalder', 'prohuman', 'workforce', 'alluvium', 'mindrift',
+  'outlier', 'dataannotation', 'remotasks', 'micro1', 'mercor', 'g2i', 'hired', 'vettery', 'talentprise',
+]
+const AGENCY_START = new RegExp(`^(${AGENCY_NAMES.join('|')})( |$)`)
+// Words that describe an agency anywhere in the name ("XY Staffing", "Recruitment Kft").
+const AGENCY_WORDS = /(^| )(staffing|recruitment|recruiting|recruiters|talent solutions|talent agency|headhunting|headhunters|outstaffing|munkaero ?kolcsonzo|munkaero ?kozvetito|zaposljavanje|regrutacija)( |$)/
+
+export function isAgency(name: string): boolean {
+  const folded = foldName(name)
+  return AGENCY_START.test(folded) || AGENCY_WORDS.test(folded)
+}
+
+export const AGENCY_PENALTY = 25
+/** The reason that marks an agency (the dashboard shows the badge for it). */
+export const AGENCY_REASON = `- staffing agency / talent marketplace, not the employer (-${AGENCY_PENALTY})`
+
 // --- profile rules for job results -------------------------------------------------------
 
 /** The dealbreakers the code enforces itself (the prompt asks for them too). */
@@ -356,6 +445,7 @@ export const MAX_PER_LISTING = 10
 /** Why results were dropped, counted per reason (stored in search_runs, 010). */
 export interface DroppedBy {
   invalid: number // no company/title, bad score, not an object
+  bad_company: number // the "company" is a job board, a category or a placeholder (companyProblem)
   duplicate: number
   over_limit: number // over MAX_RESULTS, or over MAX_PER_LISTING from one list page
   expired: number // jobs: the stated deadline is before today
@@ -375,7 +465,8 @@ export function runCounts(candidates: number, droppedBy: DroppedBy) {
     dropped_years: droppedBy.years,
     dropped_dealbreaker: droppedBy.dealbreaker,
     dropped_bad_url: droppedBy.bad_url,
-    dropped_other: droppedBy.invalid + droppedBy.duplicate + droppedBy.over_limit + droppedBy.expired,
+    dropped_other: droppedBy.invalid + droppedBy.bad_company + droppedBy.duplicate + droppedBy.over_limit +
+      droppedBy.expired,
   }
 }
 
@@ -410,8 +501,8 @@ export function validateResults(
   maxPerListing = MAX_PER_LISTING, // smaller for Serbian city chunks (prompt.ts SERBIAN_BUDGET)
 ): { results: SearchResult[]; candidates: number; fromListings: number; dropped: number; droppedBy: DroppedBy } {
   const droppedBy: DroppedBy = {
-    invalid: 0, duplicate: 0, over_limit: 0, expired: 0, unconfirmed: 0, bad_url: 0, senior: 0, years: 0,
-    dealbreaker: 0,
+    invalid: 0, bad_company: 0, duplicate: 0, over_limit: 0, expired: 0, unconfirmed: 0, bad_url: 0, senior: 0,
+    years: 0, dealbreaker: 0,
   }
   const results: SearchResult[] = []
   let candidates = 0
@@ -440,6 +531,10 @@ export function validateResults(
     const valid = companyName !== '' && (mode === 'companies' || title !== '')
     if (!valid) {
       droppedBy.invalid++
+      continue
+    }
+    if (companyProblem(companyName)) {
+      droppedBy.bad_company++
       continue
     }
 
@@ -495,10 +590,14 @@ export function validateResults(
     const remote = typeof item.remote === 'boolean' ? item.remote : null
     const skills = stringList(item.skills, 8, 40) ?? []
     const careersContact = mode === 'companies' ? contact(item.contact) : null
-    const { score, reasons } = mode === 'jobs'
+    const scored = mode === 'jobs'
       ? scoreJob({ title, city, remote: remote === true, seniority: cleanText(item.seniority, 10).toLowerCase(), skills }, scoring)
       : scoreCompany({ city, remote: remote === true, skills, juniorFriendly: item.junior_friendly === true,
         hasContact: careersContact !== null }, scoring)
+    // An agency keeps its place in the list, below the real employers.
+    const agency = isAgency(companyName)
+    const score = agency ? Math.max(0, scored.score - AGENCY_PENALTY) : scored.score
+    const reasons = [...(listing ? [LISTING_REASON] : []), ...(agency ? [AGENCY_REASON] : []), ...scored.reasons]
     if (listing) fromListings++
     results.push({
       kind: mode === 'jobs' ? 'job' : 'company',
@@ -509,7 +608,7 @@ export function validateResults(
       url,
       deadline: mode === 'jobs' ? isoDate(item.deadline) : null,
       contact: careersContact,
-      reasons: (listing ? [LISTING_REASON, ...reasons] : reasons).slice(0, 8),
+      reasons: reasons.slice(0, 8),
       score,
     })
   }

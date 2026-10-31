@@ -35,6 +35,15 @@ function contactHref(value) {
   return safeHref(value)
 }
 
+// The reason the search function adds to staffing agencies and remote talent
+// marketplaces (AGENCY_REASON in supabase/functions/search/validate.ts; the
+// same text, so no extra column is needed). Shown as an "ügynökség" badge.
+const AGENCY_REASON_PREFIX = '- staffing agency / talent marketplace'
+
+function isAgencyResult(result) {
+  return Boolean(result.reasons?.some((reason) => reason.startsWith(AGENCY_REASON_PREFIX)))
+}
+
 function scoreClass(score) {
   if (score >= 70) return 'score high'
   if (score >= 40) return 'score mid'
@@ -95,7 +104,7 @@ const DROP_LABELS = [
   ['dropped_years', 'túl sok év tapasztalat'],
   ['dropped_dealbreaker', 'kizáró szó a címben'],
   ['dropped_bad_url', 'lista- vagy keresőoldal link'],
-  ['dropped_other', 'hibás vagy duplikált'],
+  ['dropped_other', 'hibás, duplikált vagy munkáltató nélküli (állásportál, kategória, „Confidential”)'],
 ]
 
 function countsLine(counts) {
@@ -166,6 +175,9 @@ function ResultCard({ result, applied }) {
               heading
             )}
             {applied && <span className="badge applied">Már jelentkeztél</span>}
+            {isAgencyResult(result) && (
+              <span className="badge agency" title="Közvetítő vagy remote piactér, nem maga a munkáltató">ügynökség</span>
+            )}
           </h2>
           <p className="meta">
             {result.title && result.company_name}
