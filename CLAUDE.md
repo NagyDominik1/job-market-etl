@@ -225,6 +225,13 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   (Job feed, Keresés) and "Új jelentkezés" insert the application, then a 'saved' event;
   a duplicate warning first asks the database for normalize_company_key(name) (rpc), so
   there is no JS copy of the company rules.
+- "Már jelentkeztél" everywhere (9.5 A): Keresés results compare their own company_key (007)
+  with the applications' keys in the browser (live, so a later application counts too);
+  Job feed cards ask the view job_applied (014, security_invoker: jobs whose company_key
+  matches an application, or linked by job_id) for the ids shown. job_feed is unchanged.
+  Adding an application fires a browser event, so both tabs ask again.
+- Jelentkezéseim order: "Legújabb elöl" (default) = applied_at desc with not-yet-sent ones
+  first, then created_at desc; or "Következő teendő szerint" (next_action_date).
 
 ## Known limitations
 - The same job posted with a Hungarian and a Serbian (or English) title is NOT matched

@@ -52,10 +52,6 @@
   font-size: 0.85rem;
 }
 
-.badge.applied {
-  background: var(--mid);
-}
-
 /* "Stopped early, the list may be incomplete": a warning, not an error. */
 .status.notice {
   color: var(--mid);

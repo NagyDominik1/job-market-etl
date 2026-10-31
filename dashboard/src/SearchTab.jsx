@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from './supabase.js'
 import AddToApplications from './AddToApplications.jsx'
-import { safeHref } from './applications.js'
+import { safeHref, useAppliedCompanyKeys } from './applications.js'
 import './search.css'
 
 // The "Keresés" tab (Phase 9.3): starts the Edge Function "search" and shows
@@ -136,12 +136,15 @@ function runOutcome(run, resultCount) {
   return `hiba: ${run.error ?? run.status}`
 }
 
-function ResultCard({ result }) {
+// applied: the stored snapshot (already_applied, set when the result was
+// saved) OR a live match with my applications' company_keys, so a company I
+// applied to after the search is highlighted too.
+function ResultCard({ result, applied }) {
   const href = safeHref(result.url)
   const contact = contactHref(result.contact)
   const heading = result.title || result.company_name
   return (
-    <article className="card">
+    <article className={`card${applied ? ' applied-card' : ''}`}>
       <header className="card-head">
         <span className={scoreClass(result.score)} title="AI score">{result.score}</span>
         <div>
@@ -151,7 +154,7 @@ function ResultCard({ result }) {
             ) : (
               heading
             )}
-            {result.already_applied && <span className="badge applied">már jelentkeztél</span>}
+            {applied && <span className="badge applied">Már jelentkeztél</span>}
           </h2>
           <p className="meta">
             {result.title && result.company_name}
@@ -208,6 +211,7 @@ export default function SearchTab({ session }) {
   const [notice, setNotice] = useState(null) // e.g. "stopped early, the list may be incomplete"
   const [responseCounts, setResponseCounts] = useState(null) // counts from the last search's response
   const [chunks, setChunks] = useState([]) // [{label, status, count, message}] of the current search
+  const appliedKeys = useAppliedCompanyKeys()
 
   // On open: fill the form from search_profile, and show the last search.
   useEffect(() => {
@@ -412,7 +416,11 @@ export default function SearchTab({ session }) {
 
       <div className="cards">
         {results.map((result) => (
-          <ResultCard key={result.id} result={result} />
+          <ResultCard
+            key={result.id}
+            result={result}
+            applied={result.already_applied || appliedKeys.has(result.company_key)}
+          />
         ))}
       </div>
     </div>

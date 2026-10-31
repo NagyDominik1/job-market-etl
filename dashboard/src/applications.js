@@ -2,6 +2,7 @@
 // buttons on the Job feed and Keresés tabs. The dashboard only INSERTs
 // applications and events; the database trigger (migrations 006 + 011) sets
 // status and next action, so the follow-up rules live in one place.
+import { useEffect, useState } from 'react'
 import { supabase } from './supabase.js'
 
 export const STATUS_LABELS = {
@@ -69,7 +70,81 @@ export async function createApplication(fields) {
   const { data, error } = await supabase.from('applications').insert(fields).select('id').single()
   if (error) throw error
   await addEvent(data.id, 'saved')
+  notifyApplicationsChanged()
   return data.id
+}
+
+// "Már jelentkeztél" everywhere (Part A of 9.5): the tabs ask the database
+// again when an application is added anywhere on the page. A plain browser
+// event, no state library: the tabs only need to know "something changed".
+const CHANGED_EVENT = 'applications-changed'
+
+export function notifyApplicationsChanged() {
+  window.dispatchEvent(new Event(CHANGED_EVENT))
+}
+
+/** A number that goes up whenever an application is added (use it as an effect dependency). */
+export function useApplicationsVersion() {
+  const [version, setVersion] = useState(0)
+  useEffect(() => {
+    const bump = () => setVersion((v) => v + 1)
+    window.addEventListener(CHANGED_EVENT, bump)
+    return () => window.removeEventListener(CHANGED_EVENT, bump)
+  }, [])
+  return version
+}
+
+/**
+ * The company_keys of all my applications, as a Set (search results carry
+ * their own company_key, 007). Keys are computed by the database; the browser
+ * only compares them. Empty while loading or if the request fails: the badge
+ * is a hint, not a lock (the duplicate warning still asks the database).
+ */
+export function useAppliedCompanyKeys() {
+  const version = useApplicationsVersion()
+  const [keys, setKeys] = useState(() => new Set())
+  useEffect(() => {
+    let ignore = false
+    supabase
+      .from('applications')
+      .select('company_key')
+      .then(({ data }) => {
+        if (!ignore && data) setKeys(new Set(data.map((row) => row.company_key)))
+      })
+    return () => {
+      ignore = true
+    }
+  }, [version])
+  return keys
+}
+
+/**
+ * Which of these pipeline jobs are at a company I applied to (view
+ * job_applied, migration 014: same company_key or linked by job_id).
+ * Returns a Set of job ids.
+ */
+export function useAppliedJobIds(jobIds) {
+  const version = useApplicationsVersion()
+  const [applied, setApplied] = useState(() => new Set())
+  const idsKey = jobIds.join(',') // a stable dependency (a new array every render otherwise)
+  useEffect(() => {
+    let ignore = false
+    if (!idsKey) {
+      setApplied(new Set())
+      return undefined
+    }
+    supabase
+      .from('job_applied')
+      .select('job_id')
+      .in('job_id', idsKey.split(',').map(Number))
+      .then(({ data }) => {
+        if (!ignore && data) setApplied(new Set(data.map((row) => row.job_id)))
+      })
+    return () => {
+      ignore = true
+    }
+  }, [idsKey, version])
+  return applied
 }
 
 /** One application_events row; the trigger does the rest. */

@@ -255,3 +255,14 @@ input[type='range'] {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* A company I already applied to (Job feed and Keresés): tinted, with a
+   coloured left edge, so it stands out before I press Hozzáadom again. */
+.card.applied-card {
+  border-left: 4px solid var(--mid);
+  background: color-mix(in srgb, var(--mid) 8%, var(--surface));
+}
+
+.badge.applied {
+  background: var(--mid);
+}

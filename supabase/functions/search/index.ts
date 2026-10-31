@@ -416,7 +416,7 @@ async function runChunk(admin: Admin, anthropicKey: string, runId: number, index
       const { data, error } = await admin
         .from('search_results')
         .insert(results.map((result) => ({ ...result, run_id: runId })))
-        .select('id, kind, title, company_name, city, remote, url, deadline, contact, reasons, score, already_applied')
+        .select('id, kind, title, company_name, city, remote, url, deadline, contact, reasons, score, already_applied, company_key')
       if (error) throw new Error(`Could not store the results: ${error.message}`)
       saved = data ?? []
     }

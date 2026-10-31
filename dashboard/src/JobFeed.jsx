@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from './supabase.js'
 import JobCard from './JobCard.jsx'
+import { useAppliedJobIds } from './applications.js'
 
 const PAGE_SIZE = 200 // the best 200 matches; Supabase returns at most 1000 rows per request
 
@@ -40,6 +41,7 @@ export default function JobFeed({ session }) {
   const debouncedMinScore = useDebounced(minScore)
   const debouncedCity = useDebounced(city)
   const debouncedSearch = useDebounced(search)
+  const appliedJobIds = useAppliedJobIds(jobs.map((job) => job.id))
 
   useEffect(() => {
     let ignore = false // a newer query started: drop this one's result
@@ -143,7 +145,7 @@ export default function JobFeed({ session }) {
 
       <div className="cards">
         {jobs.map((job) => (
-          <JobCard key={job.id} job={job} />
+          <JobCard key={job.id} job={job} applied={appliedJobIds.has(job.id)} />
         ))}
       </div>
     </div>

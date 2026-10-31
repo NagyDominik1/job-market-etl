@@ -276,8 +276,23 @@ function ApplicationCard({ app, onChanged }) {
   )
 }
 
+// The list's order. "Legújabb elöl": by applied_at, newest first; applications
+// not sent yet (applied_at NULL) come first, newest saved first (created_at):
+// they are the freshest entries and the ones still waiting for me.
+const SORTS = {
+  newest: (query) => query
+    .order('applied_at', { ascending: false, nullsFirst: true })
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false }),
+  // nullsFirst: false -> applications without a next action go last.
+  next: (query) => query
+    .order('next_action_date', { ascending: true, nullsFirst: false })
+    .order('id'),
+}
+
 export default function TrackerTab({ session }) {
   const [status, setStatus] = useState('')
+  const [sort, setSort] = useState('newest')
   const [city, setCity] = useState('')
   const [adding, setAdding] = useState(false)
   const [apps, setApps] = useState([])
@@ -297,12 +312,7 @@ export default function TrackerTab({ session }) {
       setLoading(true)
       setError(null)
       // Filtering and sorting in the database, like the Job feed.
-      // nullsFirst: false -> applications without a next action go last.
-      let query = supabase
-        .from('applications')
-        .select('*')
-        .order('next_action_date', { ascending: true, nullsFirst: false })
-        .order('id')
+      let query = SORTS[sort](supabase.from('applications').select('*'))
       if (status) query = query.eq('status', status)
       const cityText = cleanSearch(debouncedCity)
       if (cityText) query = query.ilike('city', `%${cityText}%`)
@@ -325,7 +335,7 @@ export default function TrackerTab({ session }) {
     return () => {
       ignore = true
     }
-  }, [status, debouncedCity, reload])
+  }, [status, sort, debouncedCity, reload])
 
   return (
     <div className="page">
@@ -384,6 +394,13 @@ export default function TrackerTab({ session }) {
             {Object.entries(STATUS_LABELS).map(([value, label]) => (
               <option key={value} value={value}>{label}</option>
             ))}
+          </select>
+        </label>
+        <label>
+          Rendezés
+          <select value={sort} onChange={(e) => setSort(e.target.value)}>
+            <option value="newest">Legújabb elöl</option>
+            <option value="next">Következő teendő szerint</option>
           </select>
         </label>
         <label>

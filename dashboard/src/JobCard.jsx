@@ -22,12 +22,13 @@ function reasonClass(reason) {
   return 'neutral'
 }
 
-export default function JobCard({ job }) {
+// applied: a company I already applied to (view job_applied, 014).
+export default function JobCard({ job, applied = false }) {
   const isNew = Date.now() - new Date(job.first_seen_at).getTime() < DAY_MS
   const deadline = formatDate(job.deadline)
 
   return (
-    <article className="card">
+    <article className={`card${applied ? ' applied-card' : ''}`}>
       <header className="card-head">
         <span className={scoreClass(job.match_score)} title="Match score">
           {job.match_score ?? '–'}
@@ -43,6 +44,7 @@ export default function JobCard({ job }) {
               job.title
             )}
             {isNew && <span className="badge">new</span>}
+            {applied && <span className="badge applied">Már jelentkeztél</span>}
           </h2>
           <p className="meta">
             {job.company_name || 'Unknown company'}
