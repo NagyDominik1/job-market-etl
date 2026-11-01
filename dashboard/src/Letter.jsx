@@ -12,7 +12,7 @@ import './letters.css'
 // sent automatically. The text can be edited here before copying.
 // The language is always my choice (no automatic guess): the button is
 // disabled until hu / sr / en is picked; an application's saved language is
-// pre-selected.
+// pre-selected. Claude writes the body; the template is the fallback (body_by).
 
 // Errors from functions.invoke(): our JSON {error} or a plain status.
 async function describeLetterError(error) {
@@ -94,9 +94,15 @@ function LetterPanel({ target, defaultLanguage }) {
           <p className="letter-meta">
             {LANGUAGE_LABELS[draft.language]} levél · Önéletrajz:{' '}
             <strong>{draft.cv_variant === 'hu' ? 'magyar' : 'angol'}</strong>
-            {draft.line_by === 'rules' &&
-              ' · a személyre szabott rész a sablon szabálya szerint készült (Claude nem volt elérhető, vagy a válasza nem felelt meg: nyelv, kitalált tapasztalat, nem nevezett meg valós projektet)'}
+            {draft.body_by === 'template' &&
+              ' · a levél a sablonodból készült (Claude nem volt elérhető, vagy kétszer sem felelt meg az ellenőrzésen: nyelv, hossz, ismétlés, klisé, kitalált tapasztalat vagy projekt)'}
           </p>
+          {draft.company_summary && (
+            <p className="letter-meta">
+              A cégről{draft.company_by === 'fetched' ? ' (most kiolvasva a cég oldaláról, elmentve)' : ''}:{' '}
+              {draft.company_summary}
+            </p>
+          )}
           {draft.requirements?.length > 0 && (
             <p className="letter-meta">
               A hirdetés fő követelményei{draft.facts_by === 'fetched' ? ' (most kiolvasva a hirdetésből, elmentve)' : ''}:{' '}

@@ -11,14 +11,18 @@ import './letters.css'
 // open). Migration 016 lets the dashboard read, add and edit the text; no
 // delete. A missing template is added on the first save. Checked before
 // saving: only known placeholders, at most 5 sentences ({tailored_line} = 1).
+// Since Claude writes the whole letter body, a template gives its greeting and
+// closing, and it is the whole letter only when Claude's body can't be used.
+// The subject is set by draft-letter (posting title / "Nyílt jelentkezés –
+// junior fejlesztő"...), so it is not edited here.
 
 const COMBINATIONS = Object.keys(LANGUAGE_LABELS).flatMap((language) =>
   Object.keys(KIND_LABELS).map((kind) => ({ language, kind })))
 
 /** Why a template can't be saved, or null. */
-function problem(subject, body) {
-  if (!subject.trim() || !body.trim()) return 'A tárgy és a szöveg nem lehet üres.'
-  const unknown = unknownPlaceholders(`${subject} ${body}`)
+function problem(body) {
+  if (!body.trim()) return 'A szöveg nem lehet üres.'
+  const unknown = unknownPlaceholders(body)
   if (unknown.length) return `Ismeretlen helyőrző: {${unknown.join('}, {')}}`
   const sentences = templateSentences(body)
   if (sentences > MAX_SENTENCES) return `${sentences} mondat: legfeljebb ${MAX_SENTENCES} lehet ({tailored_line} is egy mondat).`
@@ -26,20 +30,20 @@ function problem(subject, body) {
 }
 
 function TemplateCard({ language, kind, row, onSaved }) {
-  const [subject, setSubject] = useState(row?.subject ?? '')
   const [body, setBody] = useState(row?.body ?? '')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState(null) // { error: bool, text }
-  const invalid = problem(subject, body)
-  const changed = subject !== (row?.subject ?? '') || body !== (row?.body ?? '')
+  const invalid = problem(body)
+  const changed = body !== (row?.body ?? '')
 
   async function save() {
     setBusy(true)
     setMessage(null)
-    // Edit = UPDATE of the text only (language/kind are fixed, 016); a missing template = INSERT.
+    // Edit = UPDATE of the text only (language/kind are fixed, 016); a missing template = INSERT
+    // (subject is a required column, but draft-letter no longer reads it).
     const { error } = row
-      ? await supabase.from('letter_templates').update({ subject, body }).eq('id', row.id)
-      : await supabase.from('letter_templates').insert({ language, kind, subject, body })
+      ? await supabase.from('letter_templates').update({ body }).eq('id', row.id)
+      : await supabase.from('letter_templates').insert({ language, kind, subject: kind === 'posting' ? '{position}' : '-', body })
     setBusy(false)
     if (error) {
       setMessage({ error: true, text: describeError(error) })
@@ -55,10 +59,6 @@ function TemplateCard({ language, kind, row, onSaved }) {
         {LANGUAGE_LABELS[language]} · {KIND_LABELS[kind]}
         {!row && <span className="badge applied">hiányzik</span>}
       </h2>
-      <label className="letter-field">
-        Tárgy
-        <input value={subject} onChange={(e) => setSubject(e.target.value)} />
-      </label>
       <label className="letter-field">
         Szöveg ({templateSentences(body)} / {MAX_SENTENCES} mondat)
         <textarea rows="8" value={body} onChange={(e) => setBody(e.target.value)} />
@@ -107,7 +107,10 @@ export default function TemplatesTab({ session }) {
       </header>
 
       <p className="template-help">
-        Helyőrzők: {PLACEHOLDERS.map((name) => `{${name}}`).join(', ')}. A {'{skills}'} helyére a tudásod kerül (a
+        A levél szövegét Claude írja (legfeljebb 5 mondat, a valós projektjeid alapján); a sablonból a megszólítás és
+        az elköszönés kerül bele, és ha Claude szövege kétszer sem megy át az ellenőrzésen, a teljes sablon lesz a
+        levél. A tárgy automatikus: hirdetésnél a hirdetés címe, nyílt jelentkezésnél „Nyílt jelentkezés – junior
+        fejlesztő” (angolul „Open application – Junior Developer”). Helyőrzők: {PLACEHOLDERS.map((name) => `{${name}}`).join(', ')}. A {'{skills}'} helyére a tudásod kerül (a
         hirdetésben kértek elöl, legfeljebb 4), a {'{tailored_line}'} helyére 1-2, a hirdetés követelményeit a valós
         projektjeiddel összekötő mondat a levél nyelvén (ha így 5 mondat fölé menne, csak az első marad). Magyarul írd így: „a {'{company}'}”, „A {'{position}'}”: a/az a szó alapján automatikus. Legfeljebb{' '}
         {MAX_SENTENCES} mondat; a megszólítás és az elköszönés nem számít. Név és telefonszám helyett az e-mail

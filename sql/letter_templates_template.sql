@@ -3,6 +3,12 @@
 -- personal in it (the skills come from search_profile when a letter is
 -- drafted). Later changes: the "Sablonok" tab on the dashboard.
 --
+-- Since the natural letters, Claude writes the letter body; a template gives
+-- the greeting (first line) and the closing (last line), and the whole
+-- template is the letter only when Claude's body fails the checks twice.
+-- The subject is set by draft-letter (the posting title / "Nyílt jelentkezés –
+-- junior fejlesztő"...); the subjects below are the same rule, for reference.
+--
 -- Running it again overwrites the six templates (ON CONFLICT), including
 -- changes made in the Sablonok tab.
 --
@@ -19,7 +25,7 @@
 -- at the end: the e-mail signature adds them.
 
 INSERT INTO letter_templates (language, kind, subject, body) VALUES
-('hu', 'posting', 'Jelentkezés – {position}',
+('hu', 'posting', '{position}',
 'Tisztelt Hölgyem/Uram!
 
 A {position} pozícióra jelentkezem a {company} csapatába. Fő eszközeim: {skills}. {tailored_line} Az önéletrajzomat csatoltam, és szívesen bemutatkozom személyesen vagy online is.
@@ -33,7 +39,7 @@ Junior fejlesztőként szívesen csatlakoznék a {company} csapatához, akkor is
 
 Üdvözlettel,'),
 
-('sr', 'posting', 'Prijava – {position}',
+('sr', 'posting', '{position}',
 'Poštovani,
 
 Prijavljujem se za poziciju {position} u kompaniji {company}. Moji glavni alati su {skills}. {tailored_line} U prilogu je moj CV, i rado ću se predstaviti uživo ili online.
@@ -47,14 +53,14 @@ Kao junior programer želim da se pridružim timu kompanije {company}, čak i ak
 
 Srdačan pozdrav,'),
 
-('en', 'posting', 'Application – {position}',
+('en', 'posting', '{position}',
 'Dear Hiring Team,
 
 I am applying for the {position} position at {company}. My main tools are {skills}. {tailored_line} My CV is attached, and I would be glad to introduce myself in person or online.
 
 Best regards,'),
 
-('en', 'open', 'Open application – junior developer',
+('en', 'open', 'Open application – Junior Developer',
 'Dear Hiring Team,
 
 I am a junior developer and would like to join {company}, even if there is no open position right now. My main tools are {skills}. {tailored_line} My CV is attached; I would be glad to introduce myself if an opportunity comes up.

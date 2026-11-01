@@ -23,7 +23,10 @@ VALUES (
       "required_languages_missing": ["<LANGUAGE_I_DONT_SPEAK>"]}',
     -- my real projects (migration 017): the only experience a letter may mention.
     -- kind: "project" (name = the project's name) or "internship" (name = the company)
-    '[{"name": "<PROJECT_1>", "kind": "project", "skills": ["<SKILL_1>", "<SKILL_2>"]},
+    -- summary (optional): what it does, in my words; the letter tells the project
+    -- only from this and the skills, so a summary makes the story concrete.
+    '[{"name": "<PROJECT_1>", "kind": "project", "skills": ["<SKILL_1>", "<SKILL_2>"],
+       "summary": "<WHAT_IT_DOES_IN_ONE_SENTENCE>"},
       {"name": "<COMPANY_OF_INTERNSHIP>", "kind": "internship", "skills": ["<SKILL_3>"]}]'
 )
 ON CONFLICT (id) DO UPDATE SET

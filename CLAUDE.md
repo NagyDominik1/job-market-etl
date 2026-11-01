@@ -285,6 +285,23 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   more, then a rule-based sentence about the best-fitting project (whole-word skill match;
   Serbian: masculine past-tense forms, as I asked). Two sentences that would make the letter longer than 5:
   only the first is kept.
+- Natural letters (9.5, after the PanonIT letter: "I am a junior developer" repeated, a CV-like
+  skill list, nothing about the company): Claude writes the whole body (structured output,
+  effort low), my template gives only the greeting and closing lines. Structure: who I am + what
+  I ask -> one company sentence ONLY from the saved company_summary -> one real project told as
+  a short story (the best match by skills, bestProject; search_profile.projects may carry a
+  "summary" in my words, no migration: JSONB) -> CV attached + glad to talk; 3-5 sentences.
+  Two style examples (en, hu) in my voice are in the prompt (STYLE_EXAMPLES, fictional companies
+  so their facts can't leak; replace them with my own letters any time). No company sentence
+  stored: the company's own website is looked up once (1 web_search + 1 web_fetch of 4000 tokens,
+  LinkedIn blocked, strict submit_company_fact) and saved on the application or search result;
+  '' = looked, nothing found (no second lookup), so a company is never invented. Checked in code
+  (bodyProblem): chosen language, 3-5 sentences, no two sentences starting with the same word,
+  no repeated 4-word phrase, no clichés, no years / titles above junior, no project name that is
+  not mine, at least one of my projects, no sentence with 4+ skills; one retry with the reason,
+  then the whole template filled by code (body_by = template). Subject from code: the posting
+  title, or "Nyílt jelentkezés – junior fejlesztő" / "Otvorena prijava – junior programer" /
+  "Open application – Junior Developer". A 130 s budget keeps all Claude calls under the 150 s limit.
 - Search, employer names (after run 11): company_name must be the employer named in the
   posting (prompt + schema description). The code drops results whose "company" is a job
   board (Jooble, profession.hu...), a job-site category or a placeholder ("Unclassified",

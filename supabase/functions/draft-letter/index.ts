@@ -1,7 +1,8 @@
 // Edge Function "draft-letter" (Phase 9.5): a short application letter.
 //
 // Browser (logged in) --POST {application_id | search_result_id, language}--> this function
-//     -> my template (letter_templates) + 1-2 tailored sentences from Claude (my real projects)
+//     -> the body written by Claude (max 5 sentences, my real projects), framed by my
+//        template's greeting and closing; the whole template is the fallback
 //     -> {subject, body, language, suggested CV, contact}
 //
 // The letter is only returned and shown: I copy it or open it in my mail
@@ -10,25 +11,27 @@
 // Same security shape as "search": the ANTHROPIC_API_KEY is a Supabase secret
 // read only here; the caller must be a logged-in user (no token -> 401); the
 // service_role client exists only inside the function. Claude sees what our
-// database has (posting text, match reasons, the posting's requirements). The
-// only web access: when an application has no requirements yet but has a
-// posting_url, Claude opens that ONE page with web_fetch (LinkedIn blocked,
-// 8000 tokens), reports its requirements + a company sentence, and we save
-// them on the application, so the page is opened once, not per letter.
+// database has (posting text, match reasons, the posting's requirements). Web
+// access, each at most once per application / search result (the result is saved):
+//  - no requirements yet but a posting_url: Claude opens that ONE page with
+//    web_fetch (LinkedIn blocked, 8000 tokens) and reports its requirements +
+//    a company sentence;
+//  - still no company sentence: the company's own website (one search to find
+//    it, one page). Nothing found -> no company sentence (never invented).
 // I pick the language on the dashboard; the CV follows from it (letter.ts).
-// The tailored part (1-2 sentences) must be in that language, name one of my
-// real projects and claim no years/seniority: otherwise Claude is asked once
-// more; if it fails again (or Claude is not available), a rule-based sentence
-// about the best-fitting real project is used (Claude is optional, like in
-// the pipeline), and line_by says which.
+// The body must pass the checks of letter.ts (bodyProblem): otherwise Claude
+// is asked once more, with the reason; if it fails again (or Claude is not
+// available), my template is filled by plain code (Claude is optional, like in
+// the pipeline), and body_by says which.
 
 import Anthropic from 'npm:@anthropic-ai/sdk@1.3.0'
 import { createClient } from 'npm:@supabase/supabase-js@2.118.0'
 import {
-  FACTS_SYSTEM_PROMPT, FACTS_TOOL, type Kind, LINE_SCHEMA, MAX_LINE_SENTENCES, MAX_SENTENCES, MODEL, SYSTEM_PROMPT,
-  buildLinePrompt, canFetch, cleanFacts, countSentences, factsPrompt, fallbackLine, fillTemplate, firstSentences,
-  isEmail, joinSkills, lineProblem, matchedSkills, parseProjects, postingFetchTool, problemMessage, skillsForLetter,
-  suggestCv, unknownPlaceholders, validateDraftRequest,
+  BODY_SCHEMA, BODY_SYSTEM_PROMPT, COMPANY_SYSTEM_PROMPT, COMPANY_TOOL, FACTS_SYSTEM_PROMPT, FACTS_TOOL, type Kind,
+  MAX_SENTENCES, MODEL, assembleLetter, bodyProblem, bodyProblemMessage, buildBodyPrompt, canFetch, cleanBody, cleanFacts,
+  companyLookupTools, companyPrompt, countSentences, factsPrompt, fallbackLine, fillTemplate, frameOf, isEmail,
+  joinSkills, matchedSkills, parseProjects, postingFetchTool, skillsForLetter, subjectFor, suggestCv,
+  unknownPlaceholders, validateDraftRequest,
 } from './letter.ts'
 
 const MAX_DRAFTS_PER_HOUR = 30 // a cost cap against a stuck button or a loop (one letter ~ a fraction of a cent)
@@ -166,7 +169,7 @@ async function extractFacts(
         tools: [postingFetchTool(), FACTS_TOOL],
         messages,
       },
-      { timeout: 40_000, maxRetries: 1 },
+      { timeout: 40_000, maxRetries: 0 },
     )
     input += response.usage.input_tokens + (response.usage.cache_creation_input_tokens ?? 0) +
       (response.usage.cache_read_input_tokens ?? 0)
@@ -188,36 +191,90 @@ async function extractFacts(
   return { facts: null, input, output }
 }
 
-/** Claude's one sentence + the tokens used. Throws on any API problem. */
-async function askForLine(
-  client: Anthropic, messages: Anthropic.Messages.MessageParam[],
-): Promise<{ line: string; text: string; input: number; output: number }> {
+/**
+ * The company's own website, once (when no company fact is stored): at most
+ * one search + one page. summary null = the lookup could not finish (an
+ * error, or the page failed to load: nothing saved, the next letter may try
+ * again); '' = looked, nothing found (saved: no second lookup).
+ */
+async function lookupCompany(
+  client: Anthropic, prompt: string, timeout: number,
+): Promise<{ summary: string | null; input: number; output: number }> {
+  const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt }]
+  let input = 0
+  let output = 0
+  let fetchOk = false
+  let fetchFailed = false
+  for (let request = 0; request < 3; request++) {
+    const response = await client.messages.create(
+      {
+        model: MODEL,
+        max_tokens: 3000,
+        output_config: { effort: 'low' },
+        system: COMPANY_SYSTEM_PROMPT,
+        tools: [...companyLookupTools(), COMPANY_TOOL],
+        messages,
+      },
+      { timeout, maxRetries: 0 },
+    )
+    input += response.usage.input_tokens + (response.usage.cache_creation_input_tokens ?? 0) +
+      (response.usage.cache_read_input_tokens ?? 0)
+    output += response.usage.output_tokens
+    for (const block of response.content as unknown as Array<Record<string, unknown>>) {
+      const content = block.content as { type?: string } | undefined
+      if (block.type !== 'web_fetch_tool_result') continue
+      if (content?.type === 'web_fetch_tool_result_error') fetchFailed = true
+      else fetchOk = true
+    }
+    const call = response.content.find(
+      (block): block is Anthropic.Messages.ToolUseBlock => block.type === 'tool_use' && block.name === 'submit_company_fact',
+    )
+    if (call) {
+      // A sentence counts only from a page that really loaded; no page tried = nothing found.
+      const sentence = cleanFacts([], (call.input as { company_summary?: unknown }).company_summary).companySummary
+      if (fetchOk) return { summary: sentence ?? '', input, output }
+      return { summary: fetchFailed ? null : '', input, output }
+    }
+    if (response.stop_reason !== 'pause_turn') break
+    messages.push({ role: 'assistant', content: response.content })
+  }
+  return { summary: null, input, output }
+}
+
+/** Claude's letter body + the tokens used. Throws on any API problem. */
+async function askForBody(
+  client: Anthropic, messages: Anthropic.Messages.MessageParam[], timeout: number,
+): Promise<{ body: string; text: string; input: number; output: number }> {
   const response = await client.messages.create(
     {
       model: MODEL,
-      max_tokens: 2000,
-      // low effort: one short sentence; structured output guarantees the JSON shape.
-      output_config: { effort: 'low', format: { type: 'json_schema', schema: LINE_SCHEMA } },
-      system: SYSTEM_PROMPT,
+      max_tokens: 3000,
+      // low effort: a short paragraph; structured output guarantees the JSON shape.
+      output_config: { effort: 'low', format: { type: 'json_schema', schema: BODY_SCHEMA } },
+      system: BODY_SYSTEM_PROMPT,
       messages,
     },
-    // A timeout and one retry (HTTP rule of the project); the function stays well under 150 s.
-    { timeout: 30_000, maxRetries: 1 },
+    // No SDK retry: our own second attempt (after a failed check) is the retry.
+    { timeout, maxRetries: 0 },
   )
   const input = response.usage.input_tokens + (response.usage.cache_creation_input_tokens ?? 0) +
     (response.usage.cache_read_input_tokens ?? 0)
   const output = response.usage.output_tokens
   if (response.stop_reason === 'refusal') throw Object.assign(new Error('Claude declined'), { input, output })
   const text = response.content.find((block): block is Anthropic.Messages.TextBlock => block.type === 'text')?.text ?? ''
-  const line = firstSentences((JSON.parse(text) as { tailored_line?: unknown }).tailored_line, MAX_LINE_SENTENCES)
-  if (!line) throw Object.assign(new Error('Claude returned an empty line'), { input, output })
-  return { line, text, input, output }
+  const body = cleanBody((JSON.parse(text) as { body?: unknown }).body)
+  if (!body) throw Object.assign(new Error('Claude returned an empty body'), { input, output })
+  return { body, text, input, output }
 }
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS_HEADERS })
   if (req.method !== 'POST') return json(405, { error: 'Use POST' })
 
+  // Supabase stops a function at 150 s: every Claude call gets what is left
+  // of a 130 s budget, and an optional step is skipped when too little is left.
+  const started = Date.now()
+  const left = () => 130_000 - (Date.now() - started)
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!
 
   // 1. Who is calling? (the same check as "search")
@@ -252,21 +309,18 @@ Deno.serve(async (req: Request) => {
   const source = await loadSource(admin, applicationId, searchResultId)
   if (!source) return json(404, { error: 'No such application or search result' })
 
-  // 4. Rules: CV (from my language choice), kind, template.
+  // 4. Rules: CV (from my language choice), kind, subject, template (its
+  // greeting and closing frame Claude's body; the whole template is the fallback).
   const kind: Kind = source.position ? 'posting' : 'open'
   const cv = suggestCv(language)
-  const { data: template } = await admin.from('letter_templates').select('subject, body')
+  const subject = subjectFor(language, kind, source.position)
+  const { data: template } = await admin.from('letter_templates').select('body')
     .eq('language', language).eq('kind', kind).maybeSingle()
   const log = (fields: Record<string, unknown>) =>
     admin.from('letter_drafts').insert({
       application_id: source.applicationId, search_result_id: source.searchResultId, language, kind, cv_variant: cv,
       ...fields,
     })
-  if (!template) {
-    return json(409, { error: `Nincs sablon (${language} / ${kind === 'posting' ? 'hirdetésre' : 'nyílt'}): töltsd ki a Sablonok fülön.` })
-  }
-  const unknown = unknownPlaceholders(`${template.subject} ${template.body}`)
-  if (unknown.length) return json(422, { error: `Ismeretlen helyőrző a sablonban: {${unknown.join('}, {')}}` })
 
   // 5. The posting's facts: stored ones, or (application with a posting_url,
   // never looked at) open the page once and save what it says.
@@ -276,7 +330,7 @@ Deno.serve(async (req: Request) => {
   const tokens = { input: 0, output: 0 }
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY')
   const client = apiKey ? new Anthropic({ apiKey }) : null
-  let factsBy: 'stored' | 'fetched' | 'none' = source.requirements?.length || source.companySummary ? 'stored' : 'none'
+  let factsBy: 'stored' | 'fetched' | 'none' = source.requirements?.length ? 'stored' : 'none'
   if (client && source.applicationId !== null && source.requirements === null && canFetch(source.url)) {
     try {
       const { facts, input, output } = await extractFacts(client, source.url!)
@@ -284,10 +338,10 @@ Deno.serve(async (req: Request) => {
       tokens.output += output
       if (facts) {
         source.requirements = facts.requirements
-        source.companySummary = facts.companySummary
+        source.companySummary = source.companySummary || facts.companySummary
         factsBy = 'fetched'
         const { error } = await admin.from('applications')
-          .update({ requirements: facts.requirements, company_summary: facts.companySummary })
+          .update({ requirements: facts.requirements, company_summary: source.companySummary })
           .eq('id', source.applicationId)
         if (error) console.error(`draft-letter: could not save the posting facts (${error.message})`)
       }
@@ -297,55 +351,79 @@ Deno.serve(async (req: Request) => {
   }
   const requirements = source.requirements ?? []
 
-  // 6. The tailored part (1-2 sentences): Claude, checked, or the rule-based fallback.
-  const prompt = buildLinePrompt({
+  // 6. The company sentence: the stored fact, or the company's own website,
+  // looked up once (NULL = never looked; '' = looked, nothing found). Saved on
+  // the application or the search result, so the site is not opened again.
+  let companyBy: 'stored' | 'fetched' | 'none' = source.companySummary ? 'stored' : 'none'
+  if (client && source.companySummary === null && left() > 75_000) {
+    const hints = [source.url, source.contact].filter((url): url is string => canFetch(url))
+    try {
+      const { summary, input, output } = await lookupCompany(
+        client, companyPrompt(source.company, source.city, hints), Math.min(35_000, left() - 40_000))
+      tokens.input += input
+      tokens.output += output
+      if (summary !== null) {
+        source.companySummary = summary
+        if (summary) companyBy = 'fetched'
+        const { error } = source.applicationId !== null
+          ? await admin.from('applications').update({ company_summary: summary }).eq('id', source.applicationId)
+          : await admin.from('search_results').update({ company_summary: summary }).eq('id', source.searchResultId)
+        if (error) console.error(`draft-letter: could not save the company fact (${error.message})`)
+      }
+    } catch (error) {
+      console.error(`draft-letter: could not look up the company (${describeError(error)})`)
+    }
+  }
+  const companySummary = source.companySummary || null
+
+  // 7. The body: Claude, checked; one more try with the reason; else my template.
+  const { greeting, closing } = frameOf(template?.body ?? null, language)
+  const prompt = buildBodyPrompt({
     language, kind, company: source.company, position: source.position, city: source.city,
-    reasons: source.reasons, postingText: source.postingText, mySkills, requirements,
-    companySummary: source.companySummary, projects,
+    reasons: source.reasons, postingText: source.postingText, mySkills, requirements, companySummary, projects,
   })
-  let line = ''
-  let lineBy: 'claude' | 'rules' = 'claude'
+  let letter = ''
+  let bodyBy: 'claude' | 'template' = 'claude'
   let claudeError: string | null = null
   try {
     if (!client) throw new Error('ANTHROPIC_API_KEY is not set')
     const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt }]
-    // At most two requests: the second only when the first line fails a check.
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const answer = await askForLine(client, messages)
+    for (let attempt = 1; attempt <= 2 && left() > 20_000; attempt++) {
+      const answer = await askForBody(client, messages, Math.min(30_000, left() - 5_000))
       tokens.input += answer.input
       tokens.output += answer.output
-      const problem = lineProblem(answer.line, language, projects)
+      const problem = bodyProblem(answer.body, language, projects, Object.keys(mySkills))
       if (!problem) {
-        line = answer.line
+        letter = assembleLetter(greeting, answer.body, closing)
         break
       }
-      console.log(`draft-letter: attempt ${attempt}: line rejected (${problem})`)
+      console.log(`draft-letter: attempt ${attempt}: body rejected (${problem})`)
       messages.push({ role: 'assistant', content: answer.text })
-      messages.push({ role: 'user', content: problemMessage(problem, language) })
+      messages.push({ role: 'user', content: bodyProblemMessage(problem, language) })
     }
-    if (!line) throw new Error('the line failed the checks twice')
+    if (!letter) throw new Error('the body failed the checks twice')
   } catch (error) {
     const spent = error as { input?: number; output?: number }
     tokens.input += spent.input ?? 0
     tokens.output += spent.output ?? 0
     claudeError = describeError(error)
-    console.error(`draft-letter: no usable Claude line, rule-based line instead (${claudeError})`)
-    line = fallbackLine(language, matchedSkills(source.reasons), projects, requirements)
-    lineBy = 'rules'
+    bodyBy = 'template'
+    console.error(`draft-letter: no usable Claude body, template instead (${claudeError})`)
   }
 
-  // 7. Fill and check the limit. Skills: the ones the posting matched first, max 4.
-  // Two tailored sentences that push the letter over 5: keep only the first.
-  const values = {
-    company: source.company,
-    position: source.position ?? '',
-    skills: joinSkills(skillsForLetter(source.reasons, mySkills), language),
-    tailored_line: line,
-  }
-  const subject = fillTemplate(template.subject, values, language)
-  let letter = fillTemplate(template.body, values, language)
-  if (countSentences(letter) > MAX_SENTENCES) {
-    values.tailored_line = firstSentences(line, 1)
+  if (bodyBy === 'template') {
+    // The template, filled by plain code (the letter before this change).
+    if (!template) {
+      return json(409, { error: `Nincs sablon (${language} / ${kind === 'posting' ? 'hirdetésre' : 'nyílt'}): töltsd ki a Sablonok fülön.` })
+    }
+    const unknown = unknownPlaceholders(template.body)
+    if (unknown.length) return json(422, { error: `Ismeretlen helyőrző a sablonban: {${unknown.join('}, {')}}` })
+    const values = {
+      company: source.company,
+      position: source.position ?? '',
+      skills: joinSkills(skillsForLetter(source.reasons, mySkills), language),
+      tailored_line: fallbackLine(language, matchedSkills(source.reasons), projects, requirements),
+    }
     letter = fillTemplate(template.body, values, language)
   }
   const sentences = countSentences(letter)
@@ -359,9 +437,9 @@ Deno.serve(async (req: Request) => {
   })
   if (logError) console.error(`draft-letter: could not log the draft (${logError.message})`)
   console.log(`draft-letter ${applicationId ? `application ${applicationId}` : `search result ${searchResultId}`}: ` +
-    `${language}, ${kind}, CV ${cv}, facts ${factsBy} (${requirements.length} requirements), line by ${lineBy}, ` +
-    `${sentences} sentences, ` +
-    `${tokens.input} in / ${tokens.output} out tokens`)
+    `${language}, ${kind}, CV ${cv}, facts ${factsBy} (${requirements.length} requirements), company ${companyBy}, ` +
+    `body by ${bodyBy}, ${sentences} sentences, ${tokens.input} in / ${tokens.output} out tokens, ` +
+    `${Math.round((Date.now() - started) / 1000)} s`)
 
   return json(200, {
     subject,
@@ -371,10 +449,11 @@ Deno.serve(async (req: Request) => {
     cv_variant: cv,
     contact: source.contact,
     contact_is_email: isEmail(source.contact),
-    line_by: lineBy,
+    body_by: bodyBy,
     sentences,
     requirements,
-    company_summary: source.companySummary,
+    company_summary: companySummary,
     facts_by: factsBy,
+    company_by: companyBy,
   })
 })
