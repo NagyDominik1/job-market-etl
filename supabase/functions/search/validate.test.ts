@@ -16,7 +16,8 @@ import {
   SYSTEM_PROMPT, buildChunks, buildQueryPlan, buildUserPrompt, webFetchTool, webSearchTool,
   DEFAULT_BUDGET, SERBIAN_BUDGET,
 } from './prompt.ts'
-import { SKILL_ALIASES, canonicalSkill, fold, scoreCompany, scoreJob, scoringContext, skillAlternatives } from './score.ts'
+import { MULTILINGUAL_BONUS, SKILL_ALIASES, canonicalSkill, fold, scoreCompany, scoreJob, scoringContext, skillAlternatives } from './score.ts'
+import { ROLE_FAMILIES, adjacentSlots, familiesFor } from './roles.ts'
 
 const PARAMS = { countries: ['HU'], cities: ['Szeged'], remote: false, roles: [], seniority: [], languages: [] }
 
@@ -98,7 +99,7 @@ const GOOD_JOB = {
   seniority: 'junior', years_required: 0, confirmed: true,
 }
 
-const CTX = { skills: { PHP: 3, MySQL: 2 }, seniority: ['junior'], cities: ['Szeged', 'Subotica', 'remote'], roles: ['php developer'] }
+const CTX = { skills: { PHP: 3, MySQL: 2 }, seniority: ['junior'], cities: ['Szeged', 'Subotica', 'remote'], roles: ['php developer'], languages: [], pluses: [] }
 
 test('valid results are kept, scored by our code (not the model), sorted by score', () => {
   const weak = { ...GOOD_JOB, title: 'Java Developer', city: 'Budapest', skills: ['Java'], score: 99, reasons: ['+ trust me'] }
@@ -388,7 +389,7 @@ const RUN6 = {
   roles: ['data engineer', 'backend', 'python developer', 'php developer'], seniority: ['intern', 'junior'], languages: [],
 }
 
-test('query plan: general local terms per city first, one remote query, roles only to fill (run 8)', () => {
+test('query plan: general local terms per city first, remote, adjacent roles, roles only to fill (run 8)', () => {
   const plan = buildQueryPlan(RUN6, 12)
   assert.equal(plan.length, 12)
   assert.deepEqual(plan.slice(0, 3), [
@@ -400,24 +401,28 @@ test('query plan: general local terms per city first, one remote query, roles on
   assert.ok(plan.includes('programer praksa posao Novi Sad'))        // Serbian wording
   assert.ok(plan.includes('junior programer posao Belgrade'))        // every city covered
   assert.ok(plan.includes('remote junior developer job'))
-  assert.deepEqual(plan.slice(-2), ['junior data engineer állás Szeged', 'junior backend állás Szeged'])  // roles fill
+  // 9 general queries, then remote and 2 adjacent-role queries (first city); no room left for roles here
+  assert.deepEqual(plan.slice(-3), ['remote junior developer job', 'junior tesztelő állás Szeged', 'adatelemző állás Szeged'])
+  assert.deepEqual(buildQueryPlan(RUN6, 14).slice(-2), ['junior data engineer állás Szeged', 'junior backend állás Szeged'])
   assert.equal(new Set(plan).size, plan.length)                      // no duplicates
 })
 
 test('query plan: roles fill a small plan, unknown cities, no cities, other levels', () => {
   const base = { ...RUN6, remote: false }
-  assert.deepEqual(buildQueryPlan({ ...base, cities: ['Szeged'], seniority: ['junior'], roles: ['backend'] }),
-    ['junior fejlesztő állás Szeged', 'junior programozó állás Szeged', 'junior backend állás Szeged'])
-  assert.deepEqual(buildQueryPlan({ ...base, cities: ['Wien'], roles: [], seniority: ['mid'] }), ['developer job Wien'])
+  assert.deepEqual(buildQueryPlan({ ...base, cities: ['Szeged'], seniority: ['junior'], roles: ['backend'] }, 5),
+    ['junior fejlesztő állás Szeged', 'junior programozó állás Szeged', 'junior tesztelő állás Szeged',
+      'adatelemző állás Szeged', 'junior backend állás Szeged'])
+  assert.deepEqual(buildQueryPlan({ ...base, cities: ['Wien'], roles: [], seniority: ['mid'] }),
+    ['developer job Wien', 'junior QA engineer job Wien', 'junior data analyst job Wien'])  // unknown city: English
   assert.equal(buildQueryPlan({ ...base, countries: ['RS'], cities: ['Sombor'], roles: [], seniority: ['junior'] })[0],
     'junior programer posao Sombor')                                   // one country: its wording
   assert.deepEqual(buildQueryPlan({ ...base, cities: ['Szeged'], roles: [], seniority: ['mid'] }),
-    ['fejlesztő állás Szeged', 'programozó állás Szeged'])
+    ['fejlesztő állás Szeged', 'programozó állás Szeged', 'junior tesztelő állás Szeged', 'adatelemző állás Szeged'])
   assert.deepEqual(buildQueryPlan({ ...RUN6, cities: [], roles: ['backend', 'frontend'] }),
-    ['remote junior developer job', 'remote junior backend job', 'remote junior frontend job'])
-  const small = buildQueryPlan(RUN6, 3)
-  assert.equal(small.length, 3)
-  assert.equal(small[2], 'remote junior developer job')               // remote is always kept
+    ['remote junior developer job', 'junior QA engineer remote', 'junior data analyst remote', 'remote junior backend job'])
+  // remote and one adjacent query are always kept
+  assert.deepEqual(buildQueryPlan(RUN6, 3),
+    ['junior fejlesztő állás Szeged', 'remote junior developer job', 'junior tesztelő állás Szeged'])
 })
 
 test('the jobs prompt lists the plan and asks for every opened posting; our code filters', () => {
@@ -557,8 +562,8 @@ test('each chunk has its own short query plan within the chunk budget', () => {
     assert.ok(plan.length > 0 && plan.length <= MAX_SEARCHES, `${chunk.label}: ${plan.length}`)
   }
   assert.deepEqual(buildQueryPlan(buildChunks(RUN6)[0].params), [
-    'junior fejlesztő állás Szeged', 'junior programozó állás Szeged', 'fejlesztő gyakornok állás Szeged',
-    'junior data engineer állás Szeged',
+    'junior fejlesztő állás Szeged', 'junior programozó állás Szeged', // 2 developer queries
+    'junior tesztelő állás Szeged', 'adatelemző állás Szeged',          // 2 adjacent (rotation 0: testing, data)
   ])
   assert.equal(buildQueryPlan(buildChunks(RUN6)[4].params)[0], 'remote junior developer job')
 })
@@ -621,9 +626,12 @@ test('company score: city 30, stack 30, junior-friendly 20, contact 20', () => {
 test('scoring context: the form wins, the profile fills gaps, remote is the last city', () => {
   const profile = { skills: { PHP: 3 }, cities: ['Budapest'], preferred_roles: ['backend'], seniority: ['mid'] }
   assert.deepEqual(scoringContext({ cities: ['Szeged'], remote: true, roles: [], seniority: ['junior'] }, profile),
-    { skills: { PHP: 3 }, seniority: ['junior'], cities: ['Szeged', 'remote'], roles: ['backend'] })
+    { skills: { PHP: 3 }, seniority: ['junior'], cities: ['Szeged', 'remote'], roles: ['backend'], languages: [], pluses: [] })
   assert.deepEqual(scoringContext({ cities: [], remote: false, roles: [], seniority: [] }, null),
-    { skills: {}, seniority: [], cities: [], roles: [] })
+    { skills: {}, seniority: [], cities: [], roles: [], languages: [], pluses: [] })
+  assert.deepEqual(scoringContext({ cities: [], remote: false, roles: [], seniority: [] },
+    { languages: { Hungarian: 'native', serbian: 'good' }, pluses: ['EU citizen', '', 7] }),
+  { skills: {}, seniority: [], cities: [], roles: [], languages: ['hungarian', 'serbian'], pluses: ['EU citizen'] })
 })
 
 // --- 9.5 B: Serbian budget, retry, skill aliases ---------------------------------------------------
@@ -770,4 +778,118 @@ test('companies: a summary, no requirements; facts are cleaned like any web text
   assert.equal(results[0].company_summary, 'Acme makes games')
   assert.deepEqual(postingFacts(undefined, undefined), { requirements: [], company_summary: null })
   assert.equal(postingFacts(['y'.repeat(300)], '').requirements[0].length, 120)
+})
+
+// --- broader search: adjacent role families, rotation, multilingual bonus ---------------------------
+
+const MY_PROFILE_RUN = {
+  countries: ['HU', 'RS'], cities: ['Szeged', 'Novi Sad', 'Subotica', 'Belgrade'], remote: true,
+  roles: ['php developer', 'data analyst', 'qa tester', 'it support', 'erp consultant'], seniority: ['intern', 'junior'],
+  languages: [],
+}
+
+test('rotation: consecutive runs search different role families, every family comes round', () => {
+  assert.equal(ROLE_FAMILIES.length, 6)
+  assert.deepEqual([0, 1, 2, 3].map((r) => familiesFor(r, 2).map((f) => f.key)),
+    [['testing', 'data'], ['support', 'erp'], ['devops', 'game'], ['testing', 'data']])
+  // One slot (Serbian chunks): also a different family each run, all six in six runs.
+  assert.deepEqual([0, 1, 2, 3, 4, 5].map((r) => familiesFor(r, 1)[0].key),
+    ['testing', 'data', 'support', 'erp', 'devops', 'game'])
+  for (let run = 0; run < 12; run++) {
+    for (const slots of [1, 2]) {
+      const now = familiesFor(run, slots).map((f) => f.key)
+      const next = familiesFor(run + 1, slots).map((f) => f.key)
+      assert.equal(now.filter((key) => next.includes(key)).length, 0, `run ${run}, ${slots} slots`)
+    }
+  }
+  assert.deepEqual(familiesFor(-1, 2).map((f) => f.key), ['devops', 'game'])   // never a negative index
+  assert.deepEqual([adjacentSlots(4), adjacentSlots(3), adjacentSlots(2), adjacentSlots(1)], [2, 1, 1, 0])
+})
+
+test('adjacent queries in the local language: Hungarian, Serbian, English for remote', () => {
+  const run = (id: number) => buildChunks(MY_PROFILE_RUN, id).map((chunk) =>
+    buildQueryPlan(chunk.params, chunk.budget.searches, chunk.rotation))
+  const [szeged, noviSad, subotica, , remote] = run(1) // run 1: support + erp (2 slots), data (1 slot)
+  assert.deepEqual(szeged, ['junior fejlesztő állás Szeged', 'junior programozó állás Szeged',
+    'IT support állás Szeged', 'ERP tanácsadó junior Szeged'])
+  assert.deepEqual(noviSad, ['junior programer posao Novi Sad', 'programer praksa posao Novi Sad',
+    'analitičar podataka posao Novi Sad'])
+  assert.equal(subotica.length, 3) // Serbian budget: 2 developer + 1 adjacent
+  assert.deepEqual(remote, ['remote junior developer job', 'junior IT support remote', 'junior ERP consultant remote',
+    'remote junior php developer job'])
+  // The next run: other families in every chunk.
+  const [szeged2, noviSad2, , , remote2] = run(2)
+  assert.deepEqual(szeged2.slice(2), ['junior DevOps állás Szeged', 'Unity fejlesztő állás Szeged'])
+  assert.equal(noviSad2[2], 'IT podrška posao Novi Sad')
+  assert.deepEqual(remote2.slice(1, 3), ['junior DevOps engineer remote', 'junior Unity developer remote'])
+  // The same run id rebuilds the same plan (each chunk call rebuilds it from the stored params).
+  assert.deepEqual(run(7), run(7))
+  // The prompt carries the rotated plan.
+  const chunk = buildChunks(MY_PROFILE_RUN, 1)[0]
+  assert.match(buildUserPrompt('jobs', chunk.params, null, [], '2026-11-07', chunk.budget, chunk.rotation),
+    /\n3\. IT support állás Szeged\n4\. ERP tanácsadó junior Szeged/)
+})
+
+test('every chunk plan stays within its budget with the adjacent queries, for any run', () => {
+  for (let run = 0; run < 6; run++) {
+    for (const chunk of buildChunks(MY_PROFILE_RUN, run)) {
+      const plan = buildQueryPlan(chunk.params, chunk.budget.searches, chunk.rotation)
+      assert.ok(plan.length <= chunk.budget.searches, `run ${run} / ${chunk.label}: ${plan.length}`)
+      assert.equal(new Set(plan).size, plan.length)
+      assert.ok(plan.some((q) => /fejlesztő|programozó|programer|developer/.test(q)), 'developer queries stay')
+    }
+  }
+})
+
+const ADJ_CTX = {
+  skills: { SQL: 2, Excel: 1, PHP: 3 }, seniority: ['junior'], cities: ['Szeged', 'Novi Sad', 'remote'],
+  roles: ['data analyst', 'qa tester', 'it support', 'erp consultant'],
+  languages: ['hungarian', 'serbian', 'english'], pluses: ['EU citizen'],
+}
+const jobAt = (title: string, skills: string[] = []) =>
+  ({ title, city: 'Szeged', remote: false, seniority: 'junior', skills })
+
+test('adjacent roles score normally: local title words count as my roles', () => {
+  const hu = scoreJob(jobAt('Junior adatelemző', ['SQL', 'Excel']), ADJ_CTX)
+  assert.ok(hu.reasons.includes('+ role: data analyst (adatelemző)'))
+  assert.ok(hu.reasons.includes('+ SQL (2)') && hu.reasons.includes('+ Excel (1)'))
+  const bi = scoreJob(jobAt('BI analyst', ['PowerBI', 'statisztika']), { ...ADJ_CTX, skills: { 'Power BI': 1, Statistics: 1 } })
+  assert.ok(bi.reasons.includes('+ Power BI (1)') && bi.reasons.includes('+ Statistics (1)'))
+  assert.ok(scoreJob(jobAt('QA tester'), ADJ_CTX).reasons.includes('+ role: qa tester'))  // literal match first
+  assert.ok(scoreJob(jobAt('Tesztelő (junior)'), ADJ_CTX).reasons.includes('+ role: qa tester (tesztelő)'))
+  assert.ok(scoreJob(jobAt('Analitičar podataka'), ADJ_CTX).reasons.includes('+ role: data analyst (analitičar podataka)'))
+  // Not my role: a family helps only through a role in my list.
+  assert.equal(scoreJob(jobAt('Junior DevOps engineer'), ADJ_CTX).reasons.some((r) => r.startsWith('+ role')), false)
+  // Whole words: "qa" is not found inside "Qatar".
+  assert.equal(scoreJob(jobAt('Qatar office assistant'), ADJ_CTX).reasons.some((r) => r.startsWith('+ role')), false)
+})
+
+test('support and consultant roles get a small bonus for Hungarian + Serbian + English', () => {
+  const support = scoreJob(jobAt('IT support (junior)'), ADJ_CTX)
+  const withoutBonus = scoreJob(jobAt('IT support (junior)'), { ...ADJ_CTX, languages: ['hungarian', 'english'] })
+  assert.equal(support.score - withoutBonus.score, MULTILINGUAL_BONUS)
+  assert.ok(support.reasons.includes('+ Hungarian + Serbian + English, EU citizen (support/consultant role)'))
+  assert.equal(withoutBonus.reasons.some((r) => r.includes('Serbian')), false)
+  assert.ok(scoreJob(jobAt('Junior ERP tanácsadó'), ADJ_CTX).reasons.some((r) => r.includes('support/consultant')))
+  assert.ok(scoreJob(jobAt('SAP konsultant'), ADJ_CTX).reasons.some((r) => r.includes('support/consultant')))
+  // Testing or data roles: no bonus.
+  assert.equal(scoreJob(jobAt('Junior adatelemző'), ADJ_CTX).reasons.some((r) => r.includes('support/consultant')), false)
+  // Never above 100.
+  const best = scoreJob({ title: 'IT support', city: 'Szeged', remote: false, seniority: 'junior', skills: ['PHP'] },
+    { ...ADJ_CTX, skills: { PHP: 3 } })
+  assert.equal(best.score, 100)
+})
+
+test('the form may send all my developer and adjacent roles (up to 25)', () => {
+  const roles = Array.from({ length: 30 }, (_, i) => `role ${i}`)
+  const result = validateRequest({ mode: 'jobs', params: { countries: ['HU'], roles } })
+  assert.ok(result.ok)
+  assert.equal(result.value.params.roles.length, 25)
+})
+
+test('the profile prompt mentions the pluses only when there are some', () => {
+  const profile = { skills: {}, seniority: [], cities: [], languages: {}, preferred_roles: [], dealbreakers: {} }
+  assert.match(buildUserPrompt('jobs', PARAMS, { ...profile, pluses: ['EU citizen'] }, [], '2026-11-07'),
+    /Also a plus \(support\/consultant roles\): EU citizen/)
+  assert.doesNotMatch(buildUserPrompt('jobs', PARAMS, profile, [], '2026-11-07'), /Also a plus/)
 })

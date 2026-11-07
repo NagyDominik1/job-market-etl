@@ -55,6 +55,8 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   {position} {tailored_line}, UNIQUE (language, kind); authenticated SELECT, INSERT, UPDATE
   of subject/body only, no DELETE) and letter_drafts (016; cost log of draft-letter: language,
   kind, cv_variant, status, tokens; authenticated read-only, written by the Edge Function)
+- start_search_run() since 018: 1 run per 5 minutes, none while a run is 'running';
+  search_profile.pluses TEXT[] (018)
 
 ## Decisions
 - Simple SQL migrations instead of Alembic/SQLAlchemy: numbered plain .sql files in
@@ -162,7 +164,7 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   committed; Node is not required for the pipeline.
 - AI search confirms job results with Anthropic's web_fetch (single posting pages or one
   job list page Claude found by search, max 12 per run, never a list's next pages, max 1
-  run per hour, robots.txt respected by the fetcher). Our code fetches nothing; this is
+  run per hour (per 5 minutes since 018), robots.txt respected by the fetcher). Our code fetches nothing; this is
   on-demand reading of individual pages, not a crawler, so it stays within the "no
   scraping" rule. The code drops job results
   that aren't confirmed, link to a list/search page (isListingUrl, a heuristic), or hit a
@@ -302,6 +304,19 @@ Production (later): GitHub Actions daily run → Supabase Postgres → Vercel Re
   then the whole template filled by code (body_by = template). Subject from code: the posting
   title, or "Nyílt jelentkezés – junior fejlesztő" / "Otvorena prijava – junior programer" /
   "Open application – Junior Developer". A 130 s budget keeps all Claude calls under the 150 s limit.
+- Broader search (018, after run 11 found only developer postings): rate limit 1 run per 5
+  minutes instead of 1 per hour (the spend limit on the key is the real cost cap), and no new run
+  while one is still 'running' with recent activity (a 6-chunk run takes ~6 minutes; the hour
+  window used to cover that). Every chunk's query plan has 1-2 adjacent-role queries (2 of 4
+  searches, 1 of a Serbian chunk's 3) next to the developer ones, in the city's language: role
+  families in roles.ts (testing, data, support, ERP, DevOps, game; "adatelemző állás Szeged",
+  "QA tester posao Novi Sad", "junior data analyst remote"). Rotation = the run id: run N searches
+  families N*k.. (k = slots), so consecutive runs never repeat a family and the plan is rebuilt
+  identically for every chunk call (no new column). Scoring: a family's local title words count
+  as my role when one of its roles is in my list ("+ role: data analyst (adatelemző)"); support
+  and consultant titles get MULTILINGUAL_BONUS (5) when the profile has Hungarian, Serbian and
+  English, the reason also lists search_profile.pluses ("EU citizen"); total capped at 100.
+  config/profile.yaml may carry "pluses" (the pipeline ignores the key). Max 25 roles per search.
 - Search, employer names (after run 11): company_name must be the employer named in the
   posting (prompt + schema description). The code drops results whose "company" is a job
   board (Jooble, profession.hu...), a job-site category or a placeholder ("Unclassified",

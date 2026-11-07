@@ -1,6 +1,6 @@
 """Database tests for migration 007: AI search tables.
 
-The rate limit (1 search per hour, race-free), already_applied, the URL
+The rate limit (1 search per 5 minutes since 018, race-free), already_applied, the URL
 check, the single-row profile, and who may read/write what. They need
 PostgreSQL and run in a temporary schema (db_conn fixture, conftest.py).
 """
@@ -48,19 +48,41 @@ def test_first_search_starts_a_run(conn):
     assert row == ("companies", {"cities": ["Szeged"]}, "running")
 
 
-def test_second_search_within_an_hour_is_refused(conn):
+def test_second_search_within_5_minutes_is_refused(conn):
     first, _ = start_run(conn)
+    conn.execute("UPDATE search_runs SET status = 'success' WHERE id = %s", (first,))
     second, next_allowed = start_run(conn, "companies")
     assert second is None
     started = conn.execute("SELECT started_at FROM search_runs WHERE id = %s", (first,)).fetchone()[0]
-    assert (next_allowed - started).total_seconds() == 3600
+    assert (next_allowed - started).total_seconds() == 300          # 018: 5 minutes, not an hour
     assert conn.execute("SELECT count(*) FROM search_runs").fetchone() == (1,)
 
 
-def test_search_is_allowed_again_after_an_hour(conn):
+def test_search_is_allowed_again_after_5_minutes(conn):
     first, _ = start_run(conn)
-    conn.execute("UPDATE search_runs SET started_at = now() - interval '61 minutes' WHERE id = %s", (first,))
+    conn.execute("UPDATE search_runs SET status = 'success', started_at = now() - interval '6 minutes' "
+                 "WHERE id = %s", (first,))
     assert start_run(conn)[0] is not None
+
+
+def test_a_finished_run_from_4_minutes_ago_still_counts(conn):
+    first, _ = start_run(conn)
+    conn.execute("UPDATE search_runs SET status = 'success', started_at = now() - interval '4 minutes' "
+                 "WHERE id = %s", (first,))
+    assert start_run(conn)[0] is None
+
+
+def test_a_running_run_blocks_a_new_one_however_old(conn):
+    # 018: the 5-minute window alone would let a second run start next to a
+    # 6-minute chunked run; a run with recent activity always blocks.
+    first, _ = start_run(conn)
+    conn.execute("UPDATE search_runs SET started_at = now() - interval '20 minutes', "
+                 "last_activity_at = now() - interval '30 seconds' WHERE id = %s", (first,))
+    second, next_allowed = start_run(conn)
+    assert second is None
+    wait = conn.execute("SELECT %s - now()", (next_allowed,)).fetchone()[0].total_seconds()
+    assert 55 <= wait <= 65                                          # "ask again in a minute"
+    assert conn.execute("SELECT status FROM search_runs WHERE id = %s", (first,)).fetchone() == ("running",)
 
 
 def test_a_failed_run_that_cost_nothing_does_not_count(conn):
@@ -248,7 +270,7 @@ def test_anon_cannot_start_a_run(conn_with_roles):
 
 def test_service_role_can_do_what_the_edge_function_needs(conn_with_roles):
     conn = conn_with_roles
-    conn.execute("UPDATE search_runs SET started_at = now() - interval '2 hours'")   # rate limit passed
+    conn.execute("UPDATE search_runs SET status = 'success', started_at = now() - interval '2 hours'")   # rate limit passed
     run_id = as_role(conn, "service_role", "SELECT run_id FROM start_search_run('jobs', '{}')")[0][0]
     assert run_id is not None
     assert as_role(conn, "service_role", "SELECT count(*) FROM search_profile") == [(1,)]
@@ -301,12 +323,13 @@ def test_a_long_run_with_recent_chunk_activity_is_not_stuck(conn):
     assert conn.execute("SELECT status FROM search_runs WHERE id = %s", (run_id,)).fetchone() == ("running",)
 
 
-def test_an_abandoned_run_with_results_is_closed_as_success_and_counts(conn):
+def test_an_abandoned_run_with_results_is_closed_as_success(conn):
     run_id = start_chunked(conn)
     add_result(conn, run_id)
     conn.execute("UPDATE search_runs SET started_at = now() - interval '10 minutes', "
                  "last_activity_at = now() - interval '6 minutes' WHERE id = %s", (run_id,))
-    assert start_run(conn)[0] is None                         # it gave results: the hour counts
+    # Inactive for 5+ minutes, so its 5-minute window is over (018): a new run may start.
+    assert start_run(conn)[0] is not None
     status, error = conn.execute("SELECT status, error FROM search_runs WHERE id = %s", (run_id,)).fetchone()
     assert status == "success" and "timeout" in error
 
@@ -382,3 +405,12 @@ def test_only_the_edge_function_may_claim_retries(conn_with_roles):
             as_role(conn_with_roles, role, "SELECT * FROM claim_search_chunk_retry(1, 0)")
     conn_with_roles.execute("UPDATE search_runs SET status = 'success', chunks_total = 1, failed_chunks = '{0}'")
     assert len(as_role(conn_with_roles, "service_role", "SELECT * FROM claim_search_chunk_retry(1, 0)")) == 1
+
+
+# --- 018: search_profile.pluses ----------------------------------------------------------------
+
+def test_profile_pluses_default_to_empty(conn):
+    conn.execute("INSERT INTO search_profile (skills) VALUES ('{}')")
+    assert conn.execute("SELECT pluses FROM search_profile").fetchone() == ([],)
+    conn.execute("UPDATE search_profile SET pluses = ARRAY['EU citizen']")
+    assert conn.execute("SELECT pluses FROM search_profile").fetchone() == (["EU citizen"],)

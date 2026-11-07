@@ -5,7 +5,7 @@
 --
 -- Running it again updates the row (ON CONFLICT), so it also works for changes.
 
-INSERT INTO search_profile (skills, seniority, cities, languages, preferred_roles, dealbreakers, projects)
+INSERT INTO search_profile (skills, seniority, cities, languages, preferred_roles, dealbreakers, projects, pluses)
 VALUES (
     -- skill -> level (1 = basics, 2 = used in a project, 3 = confident)
     '{"<SKILL_1>": 3, "<SKILL_2>": 2, "<SKILL_3>": 1}',
@@ -27,7 +27,10 @@ VALUES (
     -- only from this and the skills, so a summary makes the story concrete.
     '[{"name": "<PROJECT_1>", "kind": "project", "skills": ["<SKILL_1>", "<SKILL_2>"],
        "summary": "<WHAT_IT_DOES_IN_ONE_SENTENCE>"},
-      {"name": "<COMPANY_OF_INTERNSHIP>", "kind": "internship", "skills": ["<SKILL_3>"]}]'
+      {"name": "<COMPANY_OF_INTERNSHIP>", "kind": "internship", "skills": ["<SKILL_3>"]}]',
+    -- pluses (migration 018): not skills or languages, but a plus for support /
+    -- consultant roles, e.g. 'EU citizen'; shown with the multilingual bonus
+    ARRAY['<PLUS_1>']
 )
 ON CONFLICT (id) DO UPDATE SET
     skills          = EXCLUDED.skills,
@@ -37,4 +40,5 @@ ON CONFLICT (id) DO UPDATE SET
     preferred_roles = EXCLUDED.preferred_roles,
     dealbreakers    = EXCLUDED.dealbreakers,
     projects        = EXCLUDED.projects,
+    pluses          = EXCLUDED.pluses,
     updated_at      = now();

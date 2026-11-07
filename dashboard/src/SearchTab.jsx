@@ -62,7 +62,7 @@ function formatTime(value) {
 
 const TIMEOUT_MESSAGE =
   'A keresés túllépte az időkorlátot, a szerver leállította, ezért nem lett eredmény. ' +
-  'Ez nem számít bele az óránkénti keresésbe: pár perc múlva újrapróbálhatod, ' +
+  'Ez nem számít bele a keresési korlátba: pár perc múlva újrapróbálhatod, ' +
   'esetleg kevesebb várossal vagy szerepkörrel.'
 
 // Errors from functions.invoke(), as a clear Hungarian message:
@@ -80,7 +80,9 @@ async function describeFunctionError(error) {
   } catch {
     // not our JSON: the function was stopped before it could answer
   }
-  if (body?.next_allowed_at) return `Óránként egy keresés. Következő: ${formatTime(body.next_allowed_at)}`
+  if (body?.next_allowed_at) {
+    return `5 percenként egy keresés, és csak ha nem fut másik. Következő: ${formatTime(body.next_allowed_at)}`
+  }
   if (body?.error) {
     if (/time limit|timed out|timeout/i.test(body.error)) return TIMEOUT_MESSAGE
     return `A keresés nem sikerült: ${body.error}`
@@ -361,7 +363,7 @@ export default function SearchTab({ session }) {
   }
 
   // "Újrapróbálás": one failed chunk once more, in the same run (migration 015).
-  // Not a new search: the hourly limit is not touched; the function allows one
+  // Not a new search: the 5-minute limit is not touched; the function allows one
   // retry per chunk, only for the latest run and within its hour.
   async function retryChunk(index) {
     setLoading(true)
@@ -432,8 +434,10 @@ export default function SearchTab({ session }) {
           {loading ? `Keresés… ${seconds} s` : 'Keresés indítása'}
         </button>
         <span className="hint">
-          Óránként egy keresés. Városonként egy rész (max. 6, a remote is egy), részenként legfeljebb 4 webes
-          keresés (~$0.04; szerb városoknál 3) és kb. 1 perc. Egy hibás rész egyszer újrapróbálható.
+          5 percenként egy keresés (közben nem indulhat másik). Városonként egy rész (max. 6, a remote is egy),
+          részenként legfeljebb 4 webes keresés (~$0.04; szerb városoknál 3) és kb. 1 perc. Minden rész a fejlesztői
+          mellett 1-2 rokon szakmát is keres (tesztelő, adatelemző, IT support, ERP, DevOps, Unity), keresésenként
+          másikat. Egy hibás rész egyszer újrapróbálható.
         </span>
       </form>
 

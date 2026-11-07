@@ -133,7 +133,7 @@ export function validateRequest(body: unknown): Ok<{ mode: Mode; params: SearchP
   }
 
   const cities = stringList(p.cities, 10, 60)
-  const roles = stringList(p.roles, 10, 60)
+  const roles = stringList(p.roles, 25, 60) // 25: the profile has developer + adjacent roles
   const languages = stringList(p.languages, 5, 30)
   const seniority = stringList(p.seniority, 5, 10)
   if (cities === null || roles === null || languages === null || seniority === null) {

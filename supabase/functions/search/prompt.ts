@@ -1,6 +1,7 @@
 // Prompt and tool definitions for the "search" Edge Function.
 // Pure (no imports from Deno or npm), so it can be unit-tested with Node.
 
+import { adjacentSlots, familiesFor, familyQuery } from './roles.ts'
 import { FETCH_BLOCKED_DOMAINS, type Mode, type SearchParams } from './validate.ts'
 
 export const MODEL = 'claude-haiku-5-5'
@@ -39,6 +40,7 @@ export interface Profile {
   languages: Record<string, string>
   preferred_roles: string[]
   dealbreakers: Record<string, unknown>
+  pluses?: string[] // 018, e.g. "EU citizen"; missing before 018
 }
 
 // The ONLY way Claude can answer: one call of this tool. strict: true = the
@@ -173,6 +175,7 @@ function describeProfile(profile: Profile | null): string {
     `- Cities in priority order (first = most wanted): ${list(profile.cities)}`,
     `- Languages: ${languages || '(none given)'}`,
     `- Preferred roles: ${list(profile.preferred_roles)}`,
+    ...(profile.pluses?.length ? [`- Also a plus (support/consultant roles): ${profile.pluses.join(', ')}`] : []),
     describeDealbreakers(profile),
   ].join('\n')
 }
@@ -259,20 +262,37 @@ function rankedPairs<T>(cities: string[], itemsFor: (city: string) => T[], query
 }
 
 /**
+ * The adjacent-role queries (testing, data, support, ERP, DevOps, game; roles.ts)
+ * for the plan's first city, or for remote when there is no city: `slots`
+ * families, chosen by `rotation` (the run id), so consecutive runs search
+ * different families. Hungarian/Serbian wording by the city's country.
+ */
+function adjacentQueries(params: SearchParams, slots: number, rotation: number): string[] {
+  if (!slots || (!params.cities.length && !params.remote)) return []
+  const city = params.cities[0] ?? null
+  const country = city === null ? '' : cityCountry(city, params.countries)
+  return familiesFor(rotation, slots).map((family) => familyQuery(family, country, city))
+}
+
+/**
  * The searches to run, in order (run 6: left alone, the model gave up early;
- * run 8: role x city queries were too narrow). Three tiers:
+ * run 8: role x city queries were too narrow). Four tiers:
  *  1. per city, general local terms ("junior fejlesztő állás Szeged",
  *     "junior programer posao Subotica"): city priority + term order, so the
  *     top city comes first and every city gets its first term early
  *  2. one remote query when remote is wanted (always kept)
- *  3. only if budget is left: city x role ("junior backend állás Szeged")
+ *  3. 1-2 adjacent-role queries (adjacentSlots: 2 of 4 searches, 1 of 3),
+ *     rotated between runs ("adatelemző állás Szeged", "QA tester posao
+ *     Subotica", "junior data analyst remote"); always kept
+ *  4. only if budget is left: city x role ("junior backend állás Szeged")
  * Never more than `max` (the search budget).
  */
-export function buildQueryPlan(params: SearchParams, max = MAX_SEARCHES): string[] {
+export function buildQueryPlan(params: SearchParams, max = MAX_SEARCHES, rotation = 0): string[] {
   const level = levelWord(params.seniority)
   const remoteQueries = params.remote
     ? [['remote', level, 'developer job'].filter(Boolean).join(' ')]
     : []
+  const adjacent = adjacentQueries(params, adjacentSlots(max), rotation)
   const general = rankedPairs(
     params.cities,
     (city) => generalTerms(cityCountry(city, params.countries), params.seniority),
@@ -288,9 +308,8 @@ export function buildQueryPlan(params: SearchParams, max = MAX_SEARCHES): string
     ? params.roles.map((role) => ['remote', level, role, 'job'].filter(Boolean).join(' '))
     : []
 
-  const plan = [...new Set(general)].slice(0, max - remoteQueries.length)
-  plan.push(...remoteQueries)
-  for (const query of [...byRole, ...remoteByRole]) {
+  const plan = [...new Set(general)].slice(0, Math.max(0, max - remoteQueries.length - adjacent.length))
+  for (const query of [...remoteQueries, ...adjacent, ...byRole, ...remoteByRole]) {
     if (plan.length >= max) break
     if (!plan.includes(query)) plan.push(query)
   }
@@ -302,6 +321,7 @@ export interface Chunk {
   label: string // shown on the dashboard, e.g. "Szeged", "remote"
   params: SearchParams // the run's params narrowed to this chunk
   budget: ChunkBudget
+  rotation: number // which adjacent role families this run searches (the run id)
 }
 
 function budgetFor(country: string): ChunkBudget {
@@ -316,21 +336,26 @@ const COUNTRY_NAMES: Record<string, string> = { HU: 'Magyarország', RS: 'Srbija
  * The chunks of a run, in order: one per city (priority order), or one per
  * country when no city is given, then one for remote. At most MAX_CHUNKS;
  * the remote chunk is always kept. Deterministic: the function rebuilds the
- * same list from the stored params for every chunk call.
+ * same list from the stored params and the run id for every chunk call.
+ * `rotation` = the run id: every chunk of one run searches the same adjacent
+ * families, the next run the next ones.
  */
-export function buildChunks(params: SearchParams): Chunk[] {
+export function buildChunks(params: SearchParams, rotation = 0): Chunk[] {
   const places = params.cities.length
     ? params.cities.map((city) => ({
       label: city,
       params: { ...params, cities: [city], remote: false },
       budget: budgetFor(cityCountry(city, params.countries)),
+      rotation,
     }))
     : params.countries.map((code) => {
       const name = COUNTRY_NAMES[code] ?? code
-      return { label: name, params: { ...params, countries: [code], cities: [name], remote: false }, budget: budgetFor(code) }
+      return {
+        label: name, params: { ...params, countries: [code], cities: [name], remote: false }, budget: budgetFor(code), rotation,
+      }
     })
   const remote = params.remote
-    ? [{ label: 'remote', params: { ...params, cities: [], remote: true }, budget: DEFAULT_BUDGET }]
+    ? [{ label: 'remote', params: { ...params, cities: [], remote: true }, budget: DEFAULT_BUDGET, rotation }]
     : []
   return [...places.slice(0, MAX_CHUNKS - remote.length), ...remote]
 }
@@ -398,10 +423,11 @@ export function buildUserPrompt(
   appliedCompanies: string[],
   today: string,
   budget: ChunkBudget = DEFAULT_BUDGET,
+  rotation = 0, // the run id: which adjacent role families the plan has
 ): string {
   return [
     `Today is ${today}.`,
-    mode === 'jobs' ? jobsTask(buildQueryPlan(params, budget.searches), budget) : COMPANIES_RUBRIC,
+    mode === 'jobs' ? jobsTask(buildQueryPlan(params, budget.searches, rotation), budget) : COMPANIES_RUBRIC,
     '',
     'Search parameters:',
     `- Countries: ${list(params.countries)}`,

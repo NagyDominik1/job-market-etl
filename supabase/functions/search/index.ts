@@ -11,7 +11,8 @@
 // out): one per city, plus remote. The dashboard calls this function once to
 // start the run, then once per chunk, one after another:
 //   {action: "start", mode, params} -> rate limit (start_search_run, max 1 run
-//        per hour -> 429), the chunk list -> {run_id, chunks: ["Szeged", ...]}
+//        per 5 minutes since 018, none while one runs -> 429), the chunk list
+//        -> {run_id, chunks: ["Szeged", ...]}
 //   {action: "chunk", run_id, chunk} -> claim_search_chunk() (each chunk runs
 //        once, in order), one Claude conversation (claude-haiku-5-5, web search
 //        + web fetch, small budget, 60 s), the answer as ONE submit_results
@@ -19,7 +20,10 @@
 //        (score.ts), stored; the run's counts add up chunk by chunk
 //   {action: "retry", run_id, chunk} -> a failed chunk once more, inside the
 //        same run (claim_search_chunk_retry, 015: once per chunk, only the
-//        latest run, within its hour), not a new hourly search
+//        latest run, within its hour), not a new search
+// The query plan of every chunk has 1-2 adjacent-role queries (testing, data,
+// support, ERP...; roles.ts), rotated by the run id: consecutive runs search
+// different role families.
 // Every call first checks the caller is a logged-in user (no token -> 401).
 // The function itself never acts on web content: the searches and page fetches
 // run on Anthropic's side, our code fetches nothing and writes only its own two
@@ -31,6 +35,7 @@ import {
   type ChunkBudget, FETCH_FIRST_MESSAGE, KEEP_GOING_MESSAGE, MIN_CANDIDATES, MODEL, type Profile,
   SUBMIT_RESULTS_TOOL, SYSTEM_PROMPT, buildChunks, buildUserPrompt, webFetchTool, webSearchTool,
 } from './prompt.ts'
+import { adjacentSlots, familiesFor } from './roles.ts'
 import { scoringContext } from './score.ts'
 import {
   type Mode, type SearchParams, domainStats, rulesFromProfile, runCounts, validateAction, validateRequest,
@@ -159,6 +164,7 @@ async function askClaude(
   mode: Mode,
   params: SearchParams,
   budget: ChunkBudget, // searches/fetches/page size for this chunk (smaller for Serbian cities)
+  rotation: number, // the run id: which adjacent role families the query plan has
   profile: Profile | null,
   appliedCompanies: string[],
   usage: Usage,
@@ -166,7 +172,7 @@ async function askClaude(
   tag: string, // "run 12 / Szeged", for the log
 ): Promise<{ input: unknown; stoppedEarly: boolean }> {
   const messages: Anthropic.Messages.MessageParam[] = [
-    { role: 'user', content: buildUserPrompt(mode, params, profile, appliedCompanies, budapestToday(), budget) },
+    { role: 'user', content: buildUserPrompt(mode, params, profile, appliedCompanies, budapestToday(), budget, rotation) },
   ]
   let reminded = false
   let wrappingUp = false
@@ -317,13 +323,14 @@ type Admin = ReturnType<typeof createClient>
 
 /** {action: "start"}: the rate limit, then the chunk list for the dashboard. */
 async function startRun(admin: Admin, mode: Mode, params: SearchParams): Promise<Response> {
-  const chunks = buildChunks(params)
+  const chunks = buildChunks(params) // labels only: the rotation needs the run id, known after the start
   const { data: started, error: startError } = await admin.rpc('start_search_run', { p_mode: mode, p_params: params })
   if (startError) return json(500, { error: 'Could not start the search run' })
   const { run_id: runId, next_allowed_at: nextAllowedAt } = started[0]
   if (runId === null) {
     const retryAfter = Math.max(1, Math.ceil((new Date(nextAllowedAt).getTime() - Date.now()) / 1000))
-    return json(429, { error: 'One search per hour', next_allowed_at: nextAllowedAt }, { 'Retry-After': String(retryAfter) })
+    return json(429, { error: 'One search per 5 minutes, and not while one is running', next_allowed_at: nextAllowedAt },
+      { 'Retry-After': String(retryAfter) })
   }
   const { error } = await admin.from('search_runs').update({ chunks_total: chunks.length }).eq('id', runId)
   if (error) {
@@ -333,7 +340,11 @@ async function startRun(admin: Admin, mode: Mode, params: SearchParams): Promise
       .eq('id', runId)
     return json(500, { error: 'The database is not ready for chunked searches (migration 013)' })
   }
-  console.log(`search run ${runId} (${mode}): started, chunks ${chunks.map((c) => c.label).join(', ')}`)
+  // Which adjacent role families each chunk searches (Serbian chunks have 1 slot, the others 2).
+  const plan = buildChunks(params, runId).map((chunk) => mode === 'jobs'
+    ? `${chunk.label} (${familiesFor(chunk.rotation, adjacentSlots(chunk.budget.searches)).map((f) => f.key).join('+')})`
+    : chunk.label)
+  console.log(`search run ${runId} (${mode}): started, chunks ${plan.join(', ')}`)
   return json(200, { run_id: runId, chunks: chunks.map((chunk) => chunk.label) })
 }
 
@@ -402,7 +413,7 @@ async function runChunk(admin: Admin, anthropicKey: string, runId: number, index
   // The params were validated when the run started; check again (they come back as JSON).
   const stored = validateRequest({ mode: claimed[0].mode, params: claimed[0].params })
   const total: number = claimed[0].chunks_total
-  const chunk = stored.ok ? buildChunks(stored.value.params)[index] : undefined
+  const chunk = stored.ok ? buildChunks(stored.value.params, runId)[index] : undefined
   const usage: Usage = {
     searches: 0, fetches: 0, fetchCalls: 0, fetchErrors: [], fetchedUrls: [], fetchCallUrls: [], input: 0, output: 0,
   }
@@ -416,14 +427,15 @@ async function runChunk(admin: Admin, anthropicKey: string, runId: number, index
 
   try {
     const [{ data: profile }, { data: applied }] = await Promise.all([
-      admin.from('search_profile').select('skills, seniority, cities, languages, preferred_roles, dealbreakers').maybeSingle(),
+      // '*': pluses (018) is read when the column exists, and a missing one can't make the profile null.
+      admin.from('search_profile').select('*').maybeSingle(),
       admin.from('applications').select('company_name').limit(500),
     ])
     const appliedCompanies = [...new Set((applied ?? []).map((row: { company_name: string }) => row.company_name))]
 
     const client = new Anthropic({ apiKey: anthropicKey })
     const { input: raw, stoppedEarly } =
-      await askClaude(client, mode, chunk.params, chunk.budget, profile as Profile | null, appliedCompanies, usage, startedAt, tag)
+      await askClaude(client, mode, chunk.params, chunk.budget, chunk.rotation, profile as Profile | null, appliedCompanies, usage, startedAt, tag)
 
     // Validate (incl. the dealbreakers), score with ALL the run's cities and
     // roles (so a chunk's city keeps its priority), store.

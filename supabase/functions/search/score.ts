@@ -12,16 +12,29 @@
 // ("JS" = JavaScript, "postgres" = PostgreSQL), "HTML/CSS" in my profile
 // counts for HTML and CSS. One addition the pipeline doesn't have (its files
 // stay unchanged): SQL dialects count for "SQL" and the other way round.
+// Adjacent roles (roles.ts): a local title word counts as my role
+// ("Adatelemző" = data analyst), and support/consultant jobs get a small
+// bonus when I speak Hungarian, Serbian and English (MULTILINGUAL_BONUS).
 // Pure (no Deno or npm imports), so it runs in the tests with Node.
+
+import { ROLE_FAMILIES } from './roles.ts'
 
 export interface ScoringContext {
   skills: Record<string, number> // my skills, level 1-3
   seniority: string[] // the levels I look for
   cities: string[] // priority order (first = most wanted)
   roles: string[] // preferred roles, matched in the title
+  languages: string[] // languages I speak (profile keys, lowercase: "hungarian")
+  pluses: string[] // search_profile.pluses (018), shown with the multilingual bonus
 }
 
-export const EMPTY_CONTEXT: ScoringContext = { skills: {}, seniority: [], cities: [], roles: [] }
+export const EMPTY_CONTEXT: ScoringContext = { skills: {}, seniority: [], cities: [], roles: [], languages: [], pluses: [] }
+
+// Support and consultant work in Vojvodina / southern Hungary often means
+// clients in all three languages: a plus, but a small one (the skills, level
+// and city still decide). The total stays at most 100.
+export const MULTILINGUAL_BONUS = 5
+const MULTILINGUAL_LANGUAGES = ['hungarian', 'serbian', 'english']
 
 const SKILLS_FOR_FULL_POINTS = 5
 const LOWEST_PRIORITY_SHARE = 0.5
@@ -111,6 +124,13 @@ export const SKILL_ALIASES: Record<string, string> = {
   'sqlite': 'SQLite',
   'oracle': 'Oracle',
   'pl/sql': 'Oracle',
+  // search only: the data/BI roles (adjacent role families, roles.ts)
+  'power bi': 'Power BI',
+  'powerbi': 'Power BI',
+  'microsoft power bi': 'Power BI',
+  'statistics': 'Statistics',
+  'statisztika': 'Statistics',
+  'statistika': 'Statistics',
 }
 
 // A posting asking for MySQL fits someone who knows SQL, and "SQL" in a
@@ -185,10 +205,34 @@ function scoreCity(city: string, remote: boolean, ctx: ScoringContext, weight: n
   return [0, [`- ${city}`]]
 }
 
+/**
+ * 15 points when the title names one of my roles: literally ("junior php
+ * developer"), or by a title word of the role's family in another language
+ * ("Junior adatelemző" -> "+ role: data analyst (adatelemző)"). Only my own
+ * roles count: a family helps only if one of its roles is in my list.
+ */
 function scoreRole(title: string, ctx: ScoringContext): [number, string[]] {
   const folded = fold(title)
   const role = ctx.roles.find((r) => containsPhrase(folded, fold(r)))
-  return role ? [15, [`+ role: ${role}`]] : [0, []]
+  if (role) return [15, [`+ role: ${role}`]]
+  const mine = new Map(ctx.roles.map((r) => [fold(r), r]))
+  for (const family of ROLE_FAMILIES) {
+    const myRole = family.roles.map((r) => mine.get(fold(r))).find((r) => r !== undefined)
+    const word = myRole && family.titleWords.find((w) => containsPhrase(folded, fold(w)))
+    if (myRole && word) return [15, [`+ role: ${myRole} (${word})`]]
+  }
+  return [0, []]
+}
+
+/** The support/consultant bonus: such a title, and I speak all three languages. */
+function scoreMultilingual(title: string, ctx: ScoringContext): [number, string[]] {
+  const folded = fold(title)
+  const fits = ROLE_FAMILIES.some((family) =>
+    family.multilingual && family.titleWords.some((w) => containsPhrase(folded, fold(w))))
+  const speaks = MULTILINGUAL_LANGUAGES.every((language) => ctx.languages.includes(language))
+  if (!fits || !speaks) return [0, []]
+  const pluses = ['Hungarian + Serbian + English', ...ctx.pluses].join(', ')
+  return [MULTILINGUAL_BONUS, [`+ ${pluses} (support/consultant role)`]]
 }
 
 /** The facts of one job result that the score uses. */
@@ -208,11 +252,12 @@ export function scoreJob(job: JobFacts, ctx: ScoringContext): { score: number; r
     scoreSeniority(job.seniority, ctx),
     scoreCity(job.city, job.remote, ctx, 20),
     scoreRole(job.title, ctx),
+    scoreMultilingual(job.title, ctx),
   ]) {
     total += points
     reasons.push(...why)
   }
-  return { score: Math.round(total), reasons }
+  return { score: Math.min(100, Math.round(total)), reasons }
 }
 
 export interface CompanyFacts {
@@ -244,10 +289,15 @@ export function scoreCompany(company: CompanyFacts, ctx: ScoringContext): { scor
  * levels from the search form (the run's params, ALL cities, so a chunk's
  * city keeps its priority), falling back to the profile when the form left
  * them empty. Remote counts as the last city when the run includes remote.
+ * Languages and pluses come from the profile only (the form's languages are
+ * for the prompt).
  */
 export function scoringContext(
   params: { cities: string[]; remote: boolean; roles: string[]; seniority: string[] },
-  profile: { skills?: Record<string, number>; cities?: string[]; preferred_roles?: string[]; seniority?: string[] } | null,
+  profile: {
+    skills?: Record<string, number>; cities?: string[]; preferred_roles?: string[]; seniority?: string[]
+    languages?: Record<string, unknown>; pluses?: unknown
+  } | null,
 ): ScoringContext {
   const cities = params.cities.length ? [...params.cities, ...(params.remote ? ['remote'] : [])] : profile?.cities ?? []
   return {
@@ -255,5 +305,10 @@ export function scoringContext(
     seniority: params.seniority.length ? params.seniority : profile?.seniority ?? [],
     cities,
     roles: params.roles.length ? params.roles : profile?.preferred_roles ?? [],
+    languages: Object.keys(profile?.languages ?? {}).map((language) => language.trim().toLowerCase()),
+    pluses: Array.isArray(profile?.pluses)
+      ? profile.pluses.filter((plus): plus is string => typeof plus === 'string' && plus.trim() !== '')
+        .map((plus) => plus.trim().slice(0, 40)).slice(0, 3)
+      : [],
   }
 }
